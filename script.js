@@ -296,6 +296,8 @@ async function processSyncQueue(){
 			} else if(op.type === 'createAtendimento'){
 				const at = op.payload;
 				const payload = { mucipe_nome: at.name, munic_doc: at.document, dep_direcionado: at.sala.toString(), senha: at.ticket, created_at: formatLocalTimestamp(at.createdAt) };
+				if(at && at.inicio_atendimento) payload.inicio_atendimento = at.inicio_atendimento;
+				if(typeof at.concluido !== 'undefined') payload.concluido = !!at.concluido;
 				const { data, error } = await window.supabase.from('atendimentos').insert([payload]).select().maybeSingle();
 				if(error){
 					console.warn('createAtendimento insert error', error);
@@ -309,6 +311,8 @@ async function processSyncQueue(){
 					if(found){
 						found.remoteId = data && data.id;
 						found.remoteSynced = true;
+						// se inserido com inicio_atendimento no payload, atualizar o local serving se necessário
+						if(at.inicio_atendimento){ found.inicio_atendimento = at.inicio_atendimento; }
 						saveState();
 					}
 				}catch(e){ /* silent */ }
@@ -338,12 +342,13 @@ async function processSyncQueue(){
 					}
 				}
 			} else if(op.type === 'updateAtendimento'){
-				// payload: { remoteId, concluido }
+				// payload: { remoteId, concluido, inicio_atendimento }
 				try{
 					const p = op.payload || {};
 					if(!p.remoteId) throw new Error('missing remoteId');
 					const upd = {};
 					if(typeof p.concluido !== 'undefined') upd.concluido = p.concluido;
+					if(typeof p.inicio_atendimento !== 'undefined') upd.inicio_atendimento = p.inicio_atendimento;
 					const { error } = await window.supabase.from('atendimentos').update(upd).eq('id', p.remoteId);
 					if(error) throw error;
 				}catch(e){
@@ -948,7 +953,7 @@ function enableDeptControlsFor(sala){
 }
 
 // Chamar próximo: preferenciais primeiro (FIFO entre preferenciais), depois não preferenciais FIFO
-function callNextFor(sala){
+async function callNextFor(sala){
     if(!sala) return;
     const q = state.queues[sala];
     if(!q || q.length===0){
@@ -986,6 +991,42 @@ function callNextFor(sala){
 	saveState();
 	// atualizar cartão do departamento se estivermos na tela desta sala
 	if(currentDept && parseInt(currentDept,10) === parseInt(sala,10)) renderDeptCurrentServing(sala);
+
+	// registrar inicio_atendimento imediato no Supabase quando possível
+	try{
+		const at = state.serving[sala];
+		const inicioTs = formatLocalTimestamp();
+		// atualizar localmente o objeto com inicio
+		at.inicio_atendimento = inicioTs;
+		saveState();
+		// se existir remoteId, atualizar apenas o registro remoto
+		if(at.remoteId && window.supabase && window.navigator.onLine){
+			try{
+				const { error } = await window.supabase.from('atendimentos').update({ inicio_atendimento: inicioTs }).eq('id', at.remoteId);
+				if(error){ console.warn('update inicio_atendimento supabase failed', error); enqueueSync({ type: 'updateAtendimento', payload: { remoteId: at.remoteId, inicio_atendimento: inicioTs } }); }
+			}catch(e){ console.warn('update inicio_atendimento exception', e); enqueueSync({ type: 'updateAtendimento', payload: { remoteId: at.remoteId, inicio_atendimento: inicioTs } }); }
+		} else {
+			// sem remoteId: tentar inserir um registro remoto com inicio_atendimento (se online) ou enfileirar createAtendimento com campo inicio_atendimento
+			if(window.supabase && window.navigator.onLine){
+				try{
+					const payload = { mucipe_nome: at.name, munic_doc: at.document, dep_direcionado: at.sala.toString(), senha: at.ticket, created_at: formatLocalTimestamp(at.createdAt), inicio_atendimento: inicioTs, concluido: false };
+					const { data, error } = await window.supabase.from('atendimentos').insert([payload]).select().maybeSingle();
+					if(error){ console.warn('insert inicio_atendimento failed', error); // enfileirar para retry
+						// enfileira payload com inicio_atendimento para criar posteriormente
+						enqueueSync({ type: 'createAtendimento', payload: { ...at, inicio_atendimento: inicioTs } });
+					} else {
+						// atualizar referência local
+						at.remoteId = data && data.id;
+						at.remoteSynced = true;
+						saveState();
+					}
+				}catch(e){ console.warn('insert inicio_atendimento exception', e); enqueueSync({ type: 'createAtendimento', payload: { ...at, inicio_atendimento: inicioTs } }); }
+			} else {
+				// offline: enfileirar criação contendo inicio_atendimento para ser aplicada no servidor
+				enqueueSync({ type: 'createAtendimento', payload: { ...at, inicio_atendimento: inicioTs } });
+			}
+		}
+	}catch(e){ console.warn('callNextFor inicio_atendimento handling failed', e); }
 }
 
 function recallFor(sala){
