@@ -1,0 +1,217 @@
+/* Reset simples */
+*{box-sizing:border-box}
+
+body{font-family:Inter,Segoe UI, Roboto, Arial, sans-serif;margin:0;background:linear-gradient(180deg,#f8fbff 0%, #f3f6fb 100%);color:#0f172a}
+
+header{background:linear-gradient(90deg,#0b5ed7 0%, #0a58d1 100%);color:white;padding:18px 24px;display:flex;align-items:center;gap:16px;box-shadow:0 6px 18px rgba(11,94,215,0.12)}
+header h1{margin:0;font-size:1.125rem;font-weight:600}
+.header-left{display:flex;align-items:center;gap:12px}
+.logo{height:44px}
+.top-nav{margin-left:auto;display:flex;gap:8px}
+.top-nav a{color:rgba(255,255,255,0.95);text-decoration:none;padding:8px 12px;border-radius:8px;font-weight:600}
+.top-nav a:hover{background:rgba(255,255,255,0.06)}
+
+.app{max-width:1100px;margin:22px auto;padding:0 18px}
+.screen-grid{display:grid;grid-template-columns:1fr 420px;gap:18px;align-items:start}
+.screen{margin-bottom:12px}
+.card{background:white;border-radius:12px;padding:18px;box-shadow:0 6px 12px rgba(15,23,42,0.06);border:1px solid rgba(15,23,42,0.03)}
+.hidden{display:none}
+.card h2{margin-top:0;color:#0b5ed7}
+
+label{display:block;margin:10px 0;font-size:0.95rem}
+input[type=text],select,input[type=date]{width:100%;padding:10px;border:1px solid #e6eefb;border-radius:8px;background:#fbfdff}
+input[type=checkbox]{margin-left:8px}
+.actions{display:flex;gap:10px;margin-top:12px}
+button{background:#0b5ed7;color:white;border:none;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:700}
+button.secondary{background:transparent;color:#0b5ed7;border:1px solid rgba(11,94,215,0.12)}
+.btn-primary{background:#0b5ed7;color:white;border:none;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:700}
+.btn-primary.hidden{display:none}
+.btn-ghost{background:transparent;color:#0b5ed7;border:none}
+
+/* botão de ação perigosa / apagar */
+.btn-danger {
+    display: inline-block;
+    background: #d9534f; /* vermelho */
+    color: #fff;
+    border: 1px solid #c9302c;
+    padding: 8px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 600;
+    transition: background .15s ease, transform .05s ease;
+}
+.btn-danger:hover { background: #c9302c; }
+.btn-danger:active { transform: translateY(1px); }
+
+/* Espaçamento extra para o botão limpar painéis no painel público */
+#screen-public #btnClearPanels{
+    display:block;
+    margin:32px auto 0; /* 32px acima, centralizado horizontalmente */
+}
+
+.ticket-issued{margin-top:12px;padding:12px;background:linear-gradient(90deg,#eaf3ff,#f8fbff);border-radius:8px;color:#0b5ed7;font-weight:600}
+
+.panel-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+.panel-item{padding:14px;background:#0b5ed7;color:white;border-radius:8px;display:flex;flex-direction:column;justify-content:space-between;min-height:64px}
+.panel-item small{opacity:0.9}
+
+.dept-controls{margin:12px 0;display:flex;gap:8px}
+.queue-list{max-height:420px;overflow:auto;border-top:1px dashed #e9eefb;padding-top:8px}
+.queue-item{padding:12px;border-radius:8px;background:#fbfdff;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;border:1px solid rgba(11,94,215,0.06)}
+
+/* Busca de municipes - resultados */
+.search-results{margin-top:6px;border-radius:8px;border:1px solid #eef6ff;background:#ffffff;padding:8px;max-height:180px;overflow:auto}
+.search-result-item{padding:8px;border-radius:8px;cursor:pointer;border-bottom:1px dashed #f1f6ff}
+.search-result-item:last-child{border-bottom:none}
+.search-result-item:hover{background:#eef6ff}
+.search-empty{display:flex;justify-content:space-between;align-items:center;padding:10px;color:#6b7280}
+.search-empty .btn-inline{background:#0b5ed7;color:white;padding:6px 10px;border-radius:8px;border:none;cursor:pointer}
+
+/* Inline register form in reception */
+#inlineRegisterContainer form label{display:block;padding:8px;border-radius:8px;border:1px solid #eef6ff;background:#fbfdff;margin:6px 0}
+#inlineRegisterContainer .actions{justify-content:flex-end}
+#inlineRegisterContainer .actions button{padding:8px 12px}
+
+/* Estilos específicos da Recepção (apresentação mais profissional) */
+#screen-reception .reception-top{display:flex;justify-content:flex-end;margin-bottom:12px}
+#screen-reception .daily-counter{padding:10px 14px;background:linear-gradient(180deg,#eef6ff,#f5fbff);border:1px solid #cfe4ff;color:#0b5ed7;border-radius:10px;font-weight:700;box-shadow:0 4px 10px rgba(11,94,215,0.06)}
+
+/* Campos do formulário da recepção com contorno e espaçamento */
+#screen-reception form label{display:block;padding:10px;border-radius:10px;border:1px solid #e6eefb;background:#fff;box-shadow:0 4px 10px rgba(15,23,42,0.03);margin:10px 0}
+#screen-reception form label input[type=text],
+#screen-reception form label select,
+#screen-reception form label input[type=date]{background:transparent;border:none;padding:8px 6px;margin-top:6px}
+#screen-reception form label input[type=checkbox]{margin-left:8px;margin-top:6px}
+
+/* Ajuste dos botões na recepção para mais destaque */
+#screen-reception .actions{justify-content:flex-end}
+#screen-reception .actions button{border-radius:8px;padding:10px 16px}
+
+footer{padding:14px;text-align:center;color:#6b7280}
+
+/* telas responsivas */
+@media (max-width:1100px){.screen-grid{grid-template-columns:1fr}} 
+@media (max-width:700px){header{padding:12px} .top-nav a{padding:6px 8px;font-size:0.9rem} .logo{height:36px} .app{padding:0 12px}} 
+
+/* departamentos list */
+.departments-list ul{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+.departments-list a{display:block;padding:12px;background:#eef6ff;border-radius:8px;text-decoration:none;color:#0b5ed7;font-weight:700}
+
+/* Relatórios */
+.report-actions{margin:12px 0;display:flex;align-items:center;gap:12px}
+.report-table table{width:100%;border-collapse:collapse}
+.report-table th,.report-table td{padding:10px;border:1px solid #eef2ff;text-align:left}
+.report-table thead th{background:#f8fbff}
+.report-filters{display:flex;gap:10px;flex-wrap:wrap;align-items:end}
+.report-filters label{display:flex;flex-direction:column;font-size:0.95rem}
+
+/* destacar o título dos filtros em negrito e azul, mantendo os inputs em estilo normal */
+.report-filters label{color:#0b5ed7;font-weight:700}
+.report-filters label select, .report-filters label input{color:#0f172a;font-weight:400;margin-top:6px}
+.filter-actions{display:flex;gap:8px}
+.report-actions > button{margin-left:6px}
+
+/* --- Estética aprimorada para Usuários e Relatórios --- */
+/* Tela Usuários: formulários em caixas e lista com cards */
+#screen-users form label{display:block;padding:12px;border-radius:12px;border:1px solid #e6eefb;background:#fff;box-shadow:0 8px 20px rgba(15,23,42,0.04);margin:10px 0}
+#screen-users form label input,#screen-users form label select,#screen-users form label input[type=password]{background:transparent;border:none;padding:8px 6px;margin-top:6px;width:100%}
+#screen-users .actions{justify-content:flex-end}
+#usersList .queue-item{padding:14px;border-radius:12px;background:linear-gradient(180deg,#ffffff,#fbfdff);margin-top:10px;border:1px solid #e6eefb;box-shadow:0 6px 16px rgba(11,94,215,0.04);display:flex;justify-content:space-between;align-items:center}
+
+/* Novos blocos para a tela de usuários: cadastro e lista separados por bordas */
+.users-blocks{display:flex;gap:18px;align-items:flex-start;flex-wrap:nowrap}
+
+/* Permitir que o bloco de usuários quebre o container principal e use mais largura
+     apenas dentro da aba de usuários. Mantém o restante da aplicação com largura padrão. */
+/* Alinhamento: manter os blocos de usuários alinhados ao container principal
+     (sem 'breakout') para evitar desalinhamento e overflow inesperado. */
+#screen-users .users-blocks{
+    max-width:1100px; /* mesmo valor do .app para alinhar bordas */
+    width:100%;
+    margin:0 auto; /* centraliza dentro do .app */
+    padding:0 18px; /* mantém alinhamento interno com os títulos */
+    box-sizing:border-box;
+}
+
+/* manter comportamento responsivo: empilhar blocos em telas menores */
+@media (max-width:1100px){
+    .users-blocks{flex-direction:column}
+    .user-card{max-width:100%;flex:initial}
+}
+.user-card, .user-list-card{background:#fff;border:1px solid #e6eefb;border-radius:12px;padding:16px;box-shadow:0 8px 24px rgba(15,23,42,0.04);flex:1}
+.user-card h3, .user-list-card h3{margin-top:0;color:#0b5ed7;margin-bottom:8px}
+.user-card{max-width:420px;flex:0 0 420px}
+.user-list-card{flex:1;min-width:300px}
+
+/* telas menores: empilhar blocos e ajustar espaçamento */
+@media (max-width:1100px){
+    .users-blocks{flex-direction:column}
+    .user-card{max-width:100%;flex:initial}
+}
+
+/* contador de usuários deve ocupar linha própria abaixo dos filtros */
+#screen-users #usersCount{display:block;margin-top:6px;font-size:0.95rem;color:#555}
+
+/* select pequeno proporcional ao conteúdo (usado no userSort) */
+.small-select{padding:6px 8px;border-radius:6px;border:1px solid #ddd;background:#fff;min-width:60px;max-width:110px;width:auto}
+.small-select option{padding:4px 6px}
+
+/* select médio para departamento (mais compacto que o default) */
+.medium-select{padding:8px;border-radius:6px;border:1px solid #ddd;min-width:120px;max-width:160px}
+.medium-select option{padding:6px}
+
+/* Modal simples */
+.modal{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(7,12,25,0.35);z-index:1200}
+.modal.hidden{display:none}
+.modal-content{background:#fff;padding:18px;border-radius:12px;box-shadow:0 12px 40px rgba(7,12,25,0.2);width:420px;max-width:92%}
+.modal-content h4{margin-top:0;color:#0b5ed7}
+.modal-options{display:flex;gap:12px;padding:12px 0}
+.modal-options label{display:flex;align-items:center;gap:8px}
+.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
+
+/* Card 'em atendimento' para departamentos */
+.current-serving.dept-panel{display:flex;align-items:center;justify-content:space-between;padding:12px;margin:12px 0;border-radius:12px;background:linear-gradient(90deg,#ffffff,#f6fbff);border:1px solid rgba(11,94,215,0.06);box-shadow:0 8px 24px rgba(11,94,215,0.06)}
+.current-serving.dept-panel .avatar{width:56px;height:56px;border-radius:50%;background:linear-gradient(180deg,#0b5ed7,#0a58d1);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:20px;box-shadow:0 6px 16px rgba(10,88,209,0.12);flex-shrink:0}
+.current-serving.dept-panel .info{flex:1;min-width:0;margin-left:12px}
+.current-serving.dept-panel .info .name{font-weight:800;color:#072a62;font-size:1.06rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.current-serving.dept-panel .info .meta{font-size:0.88rem;color:#475569;margin-top:4px}
+.current-serving.dept-panel .info .meta-line{font-size:0.88rem;color:#475569;margin-top:4px}
+.current-serving.dept-panel .ticket{background:#eef6ff;border:1px solid rgba(11,94,215,0.08);color:#0b5ed7;font-weight:800;padding:8px 12px;border-radius:10px;font-size:0.98rem;flex-shrink:0}
+.current-serving.dept-panel.empty{display:none}
+
+/* ticket + ações */
+.current-serving.dept-panel .ticket-actions{display:flex;align-items:center;gap:16px;min-width:180px}
+.current-serving.dept-panel .ticket-actions .ticket{flex:0 0 auto}
+.current-serving.dept-panel .ticket-actions .actions-right{display:flex;flex-direction:row;gap:10px;margin-left:12px}
+.current-serving.dept-panel .actions-right button{padding:8px 10px;border-radius:8px;border:none;cursor:pointer;font-weight:700}
+.current-serving.dept-panel .actions-right .btn-complete{background:#0b5ed7;color:white;box-shadow:0 4px 12px rgba(11,94,215,0.08)}
+.current-serving.dept-panel .actions-right .btn-complete:hover{background:#0957c2}
+.current-serving.dept-panel .actions-right .btn-close{background:#ef4444;color:white}
+.current-serving.dept-panel .actions-right .btn-close:hover{background:#dc2626}
+
+
+
+/* Tela Login: aplicar mesmo visual profissional do Usuários */
+#screen-login form label{display:block;padding:12px;border-radius:12px;border:1px solid #e6eefb;background:#fff;box-shadow:0 8px 20px rgba(15,23,42,0.04);margin:10px 0}
+#screen-login form label input,#screen-login form label input[type=password]{background:transparent;border:none;padding:8px 6px;margin-top:6px;width:100%}
+#screen-login .actions{justify-content:flex-end}
+
+/* Relatórios: painel de filtros como card e tabela mais legível */
+.report-actions{background:#fff;border:1px solid #e8f4ff;padding:12px;border-radius:12px;box-shadow:0 8px 24px rgba(15,23,42,0.04);align-items:center}
+.report-filters label{display:flex;flex-direction:column;padding:8px;border-radius:10px;background:#fbfdff;border:1px solid #eef6ff}
+.report-table{margin-top:12px;border-radius:10px;overflow:hidden;border:1px solid #eef6ff}
+.report-table table{width:100%}
+.report-table thead th{background:linear-gradient(180deg,#f6fbff,#f0f7ff);font-weight:700}
+.report-table tbody tr:nth-child(even){background:#fbfdff}
+.report-table tbody tr:hover{background:#eef6ff}
+
+/* Botão Export com destaque */
+#exportCsv{background:#0a58d1;color:white;border:none;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:700}
+
+/* Ajustes responsivos finos */
+@media (max-width:900px){
+	.report-actions{flex-direction:column;align-items:stretch}
+	.report-filters{width:100%}
+}
+
+
