@@ -1357,6 +1357,190 @@ function ensureFetchTodayCountOnReady(attempts = 10, delayMs = 500){
 // chamar na inicialização
 ensureFetchTodayCountOnReady();
 
+// --- Realtime sync (Supabase) ---
+function setupRealtimeSync(){
+	if(!window.supabase) return;
+	if(window._filaRealtimeSetup) return; // evitar múltiplas inscrições
+	window._filaRealtimeSetup = true;
+	console.info('[realtime] inicializando assinatura Supabase');
+
+	const handleAtendimentoRecord = (event, rec)=>{
+		try{
+			if(!rec) return;
+			// mapear sala similar ao fetchRemoteAtendimentos
+			const salaKey = rec.dep_direcionado || '';
+			let salaNum = null;
+			if(/^[0-9]+$/.test(String(salaKey))) salaNum = String(salaKey);
+			else {
+				for(const k in SALAS){ if(String(SALAS[k]).indexOf(salaKey)!==-1 || SALAS[k].indexOf(salaKey)!==-1) { salaNum = String(k); break; } }
+			}
+
+			// helper para procurar e remover por remoteId ou senha
+			const removeFromQueuesById = (id)=>{
+				if(!id) return false;
+				let removed = false;
+				state.queues = state.queues || {};
+				for(const s in state.queues){
+					const arr = state.queues[s] || [];
+					const idx = arr.findIndex(x => x.remoteId === id || String(x.ticket) === String(rec.senha));
+					if(idx !== -1){ arr.splice(idx,1); removed = true; }
+				}
+				return removed;
+			};
+
+			// INSERT: adicionar na fila se ainda não existir
+			if(event === 'INSERT' || event === 'insert'){
+				if(!salaNum) return;
+				state.queues = state.queues || {};
+				state.queues[salaNum] = state.queues[salaNum] || [];
+				const exists = state.queues[salaNum].some(x => x.remoteId === rec.id || x.ticket === (rec.senha || ''));
+				if(!exists){
+					state.queues[salaNum].push({ name: rec.mucipe_nome || rec.nome || '', document: rec.munic_doc || '', preferencial: false, sala: parseInt(salaNum,10), ticket: rec.senha || '', createdAt: rec.created_at || rec.createdAt, remoteId: rec.id, remoteSynced: true });
+					saveState();
+					// re-render sala e painel público
+					try{ if(currentDept && String(currentDept) === String(salaNum)) renderQueueForDept(salaNum); }catch(_){}
+					renderPublicPanel();
+				}
+				return;
+			}
+
+			// UPDATE: tratar conclusão ou atualização de campos
+			if(event === 'UPDATE' || event === 'update'){
+				// se concluido, remover da fila local e ajustar serving/history
+				if(typeof rec.concluido !== 'undefined' && rec.concluido){
+					// remover da fila
+					const removed = removeFromQueuesById(rec.id);
+					// se alguém está sendo atendido com este remoteId, limpar
+					try{
+						for(const s in state.serving){
+							const sv = state.serving[s];
+							if(sv && (sv.remoteId === rec.id || sv.ticket === (rec.senha || ''))){
+								// adicionar ao history se não existir
+								state.history = state.history || [];
+								state.history.push({ name: sv.name, document: sv.document || sv.documento, sala: parseInt(s,10), departamento: SALAS[s], ticket: sv.ticket, datetime: sv.calledAt ? formatLocalTimestamp(sv.calledAt) : formatLocalTimestamp(), endedAt: formatLocalTimestamp() });
+								state.serving[s] = null;
+							}
+						}
+					}catch(_){ }
+					saveState();
+					renderPublicPanel();
+					if(currentDept) renderQueueForDept(currentDept);
+					return;
+				}
+				// outra atualização: tentar atualizar item na fila/serving
+				try{
+					state.queues = state.queues || {};
+					let changed = false;
+					for(const s in state.queues){
+						const arr = state.queues[s] || [];
+						const it = arr.find(x => x.remoteId === rec.id || x.ticket === (rec.senha || ''));
+						if(it){
+							it.remoteSynced = true; it.remoteId = rec.id; it.name = rec.mucipe_nome || it.name; it.document = rec.munic_doc || it.document;
+							changed = true;
+						}
+					}
+					// also update serving if matches
+					for(const s in state.serving){
+						const sv = state.serving[s];
+						if(sv && (sv.remoteId === rec.id || sv.ticket === (rec.senha || ''))){
+							sv.remoteSynced = true; sv.remoteId = rec.id; sv.name = rec.mucipe_nome || sv.name; sv.document = rec.munic_doc || sv.document;
+							changed = true;
+						}
+					}
+					if(changed){ saveState(); if(currentDept) renderQueueForDept(currentDept); renderPublicPanel(); }
+				}catch(_){ }
+				return;
+			}
+
+			// DELETE: remover se existir
+			if(event === 'DELETE' || event === 'delete'){
+				const removed = removeFromQueuesById(rec.id);
+				if(removed){ saveState(); if(currentDept) renderQueueForDept(currentDept); renderPublicPanel(); }
+				return;
+			}
+		}catch(e){ console.warn('[realtime] handleAtendimentoRecord error', e); }
+	};
+
+	const handleUserRecord = (event, rec)=>{
+		try{
+			if(!rec) return;
+			// updates to login_usuarios: inserir/atualizar state.users
+			state.users = state.users || [];
+			const existing = state.users.find(x=>x.email === rec.email);
+			const role = dbDeptToRole(rec.departamento);
+			if(event === 'INSERT' || event === 'insert'){
+				if(!existing) { state.users.push({ email: rec.email, password: '', role: role, remoteId: rec.id, ativo: rec.ativo }); saveState(); }
+				else { existing.role = role; existing.remoteId = rec.id; existing.ativo = rec.ativo; saveState(); }
+				if(location.hash.replace('#','') === 'users') renderRemoteUsersList();
+				return;
+			}
+			if(event === 'UPDATE' || event === 'update'){
+				if(existing){ existing.role = role; existing.ativo = rec.ativo; existing.remoteId = rec.id; saveState(); }
+				else { state.users.push({ email: rec.email, password:'', role:role, remoteId: rec.id, ativo: rec.ativo }); saveState(); }
+				if(location.hash.replace('#','') === 'users') renderRemoteUsersList();
+				return;
+			}
+			if(event === 'DELETE' || event === 'delete'){
+				const idx = state.users.findIndex(x=>x.email === rec.email || x.remoteId === rec.id);
+				if(idx !== -1){ state.users.splice(idx,1); saveState(); if(location.hash.replace('#','') === 'users') renderRemoteUsersList(); }
+				return;
+			}
+		}catch(e){ console.warn('[realtime] handleUserRecord error', e); }
+	};
+
+	// Suportar supabase-js v2 (channel) e v1 (from().on)
+	try{
+		if(typeof window.supabase.channel === 'function'){
+			// v2
+			const chAt = window.supabase.channel('realtime:atendimentos');
+			chAt.on('postgres_changes', { event: '*', schema: 'public', table: 'atendimentos' }, (payload)=>{
+				const ev = payload.eventType || payload.type || (payload?.event); // eventType for v2
+				const rec = payload.new || payload.record || payload?.payload || payload.data || payload;
+				handleAtendimentoRecord((ev || '').toUpperCase(), rec);
+			});
+			chAt.subscribe();
+
+			const chUsr = window.supabase.channel('realtime:login_usuarios');
+			chUsr.on('postgres_changes', { event: '*', schema: 'public', table: 'login_usuarios' }, (payload)=>{
+				const ev = payload.eventType || payload.type || (payload?.event);
+				const rec = payload.new || payload.record || payload?.payload || payload.data || payload;
+				handleUserRecord((ev || '').toUpperCase(), rec);
+			});
+			chUsr.subscribe();
+		} else if(window.supabase && typeof window.supabase.from === 'function' && window.supabase.from('atendimentos').on){
+			// v1
+			try{
+				window.supabase.from('atendimentos').on('*', payload=>{
+					const ev = (payload.event || payload.type || '').toUpperCase();
+					const rec = payload.new || payload.record || payload;
+					handleAtendimentoRecord(ev, rec);
+				}).subscribe();
+			}catch(e){ console.warn('[realtime] v1 atendimentos subscribe failed', e); }
+			try{
+				window.supabase.from('login_usuarios').on('*', payload=>{
+					const ev = (payload.event || payload.type || '').toUpperCase();
+					const rec = payload.new || payload.record || payload;
+					handleUserRecord(ev, rec);
+				}).subscribe();
+			}catch(e){ console.warn('[realtime] v1 login_usuarios subscribe failed', e); }
+		} else {
+			console.info('[realtime] cliente supabase não expõe métodos de realtime conhecidos; será usado polling como fallback');
+			// fallback: polling periódico para manter sincronização
+			setInterval(async ()=>{
+				try{ if(window.supabase && window.navigator.onLine){ await fetchRemoteAtendimentos(); fetchRemoteUsers(); } }catch(e){ /* silent */ }
+			}, 5000); // a cada 5s
+		}
+	}catch(e){ console.warn('[realtime] setup failed', e); }
+}
+
+// iniciar realtime assim que supabase estiver pronto
+function ensureRealtimeOnReady(attempts = 10, delayMs = 1000){
+	if(window.supabase && window.navigator.onLine){ try{ setupRealtimeSync(); }catch(e){ console.warn('[realtime] ensure start failed', e); } return; }
+	if(attempts <= 0) return;
+	setTimeout(()=> ensureRealtimeOnReady(attempts-1, delayMs), delayMs);
+}
+ensureRealtimeOnReady();
+
 // --- Usuários & Auth ---
 function ensureAdminExists(){
 	// se não há nenhum usuário, criar um admin padrão (email: admin@local, senha: admin)
