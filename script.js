@@ -519,6 +519,43 @@ async function fetchRemoteTodayCount(retries = 2){
 	}
 }
 
+// buscar atendimentos remotos recentes e mesclar nas filas locais (evita duplicatas por senha/ticket)
+async function fetchRemoteAtendimentos(departamentoFiltro){
+	if(!window.supabase) return [];
+	try{
+		// buscar atendimentos não concluídos (ou recentes) para popular as filas
+		const q = window.supabase.from('atendimentos').select('*').order('created_at', { ascending: true }).limit(500);
+		const { data, error } = await q;
+		if(error){ console.warn('fetchRemoteAtendimentos error', error); return []; }
+		const rows = Array.isArray(data) ? data : [];
+		// mapear para state.queues por dep_direcionado (campo no banco)
+		state.queues = state.queues || {};
+		rows.forEach(r=>{
+			try{
+				const salaKey = r.dep_direcionado || '';
+				// tentar extrair número da sala (se estiver no formato "Sala X - Nome" ou apenas número)
+				let salaNum = null;
+				if(/^[0-9]+$/.test(String(salaKey))) salaNum = salaKey;
+				else {
+					// procurar correspondência com SALAS
+					for(const k in SALAS){ if(String(SALAS[k]).indexOf(salaKey)!==-1 || SALAS[k].indexOf(salaKey)!==-1) { salaNum = k; break; } }
+				}
+				// se departamentoFiltro fornecido e não bate, pular
+				if(departamentoFiltro && String(departamentoFiltro) !== String(salaNum)) return;
+				if(!salaNum) return;
+				state.queues[salaNum] = state.queues[salaNum] || [];
+				// evitar duplicata por senha (campo senha)
+				const exists = state.queues[salaNum].some(x=> x.ticket === (r.senha || r.senha) || x.remoteId === r.id);
+				if(!exists){
+					state.queues[salaNum].push({ name: r.mucipe_nome || r.nome || '', document: r.munic_doc || '', preferencial: false, sala: parseInt(salaNum,10), ticket: r.senha || '', createdAt: r.created_at || r.createdAt, remoteId: r.id, remoteSynced: true });
+				}
+			}catch(e){ /* silent */ }
+		});
+		saveState();
+		return rows;
+	}catch(e){ console.warn('fetchRemoteAtendimentos exception', e); return []; }
+}
+
 // Chamar quando voltamos online para atualizar o contador remoto
 window.addEventListener('online', ()=>{ fetchRemoteTodayCount(); });
 
@@ -639,7 +676,15 @@ function renderPublicPanel(){
 function renderQueueForDept(sala){
 	if(!deptQueueList) return;
 	deptQueueList.innerHTML = '';
-    const arr = state.queues[sala] || [];
+	const arr = state.queues[sala] || [];
+	// badge indicando se algum item já veio do remoto
+	const hasRemote = Array.isArray(arr) && arr.some(i => i.remoteSynced || i.remoteId);
+	const badge = document.createElement('div');
+	badge.style.marginBottom = '6px';
+	badge.style.fontSize = '0.85rem';
+	badge.style.color = hasRemote ? '#065f46' : '#374151';
+	badge.textContent = hasRemote ? 'Fonte: Remoto + Local' : 'Fonte: Local';
+	deptQueueList.appendChild(badge);
     if(arr.length===0){ deptQueueList.innerHTML = '<p>Nenhuma pessoa na fila.</p>'; return; }
     arr.forEach((item,idx)=>{
         const div = document.createElement('div');
@@ -1252,7 +1297,8 @@ function handleHash(){
 			location.hash = 'reception'; return;
 		}
 		showScreen('screen-users');
-		renderUsersList();
+		// Renderizar apenas usuários remotos (do Supabase)
+		renderRemoteUsersList();
 	} else if(h.startsWith('dept-')){
 		const num = h.split('-')[1];
 		if(!num || !SALAS[num]){ location.hash = 'departments'; return; }
@@ -1263,7 +1309,15 @@ function handleHash(){
 		currentDept = num;
 		showScreen('screen-department');
 		deptTitle.textContent = SALAS[num];
-			renderQueueForDept(num);
+				// primeiro render local rapidamente
+				renderQueueForDept(num);
+				// tentar popular com dados remotos e re-renderizar
+				if(window.supabase && window.navigator.onLine){
+					fetchRemoteAtendimentos(num).then(()=>{
+						renderQueueForDept(num);
+					}).catch(e=>{ console.warn('fetchRemoteAtendimentos failed', e); });
+				}
+				// Nota: atualização remota é feita automaticamente ao entrar na sala via fetchRemoteAtendimentos
 			// atualizar cartão 'em atendimento' para esta sala
 			renderDeptCurrentServing(num);
 		enableDeptControlsFor(num);
@@ -1380,6 +1434,47 @@ function renderUsersList(){
 		}
 		usersList.appendChild(div);
 	});
+}
+
+// Renderizar apenas usuários vindos do Supabase (sem mostrar users locais)
+async function renderRemoteUsersList(){
+	const usersListEl = document.getElementById('usersList');
+	if(!usersListEl) return;
+	usersListEl.innerHTML = '';
+	// header / refresh
+	const header = document.createElement('div');
+	header.style.display = 'flex';
+	header.style.justifyContent = 'space-between';
+	header.style.alignItems = 'center';
+	const title = document.createElement('div');
+	title.textContent = 'Usuários (remotos)';
+	title.style.fontWeight = '600';
+	header.appendChild(title);
+	// cabeçalho simples (sem botão de refresh manual)
+	usersListEl.appendChild(header);
+
+	if(!window.supabase){
+		const p = document.createElement('div');
+		p.textContent = 'Supabase não configurado — sem dados remotos para exibir.';
+		p.style.marginTop = '8px';
+		usersListEl.appendChild(p);
+		return;
+	}
+	try{
+		const { data, error } = await window.supabase.from('login_usuarios').select('*').order('email', { ascending: true }).limit(1000);
+		if(error){ console.warn('renderRemoteUsersList supabase error', error); const p = document.createElement('div'); p.textContent = 'Erro ao buscar usuários remotos. Veja console.'; usersListEl.appendChild(p); return; }
+		const rows = Array.isArray(data) ? data : [];
+		if(rows.length === 0){ const p = document.createElement('div'); p.textContent = 'Nenhum usuário remoto encontrado.'; p.style.marginTop = '8px'; usersListEl.appendChild(p); return; }
+		rows.forEach(u=>{
+			const div = document.createElement('div');
+			div.className = 'queue-item';
+			const info = document.createElement('div');
+			const roleLabel = roleToDbDept(u.departamento) || '';
+			info.innerHTML = `<strong>${escapeHtml(u.email)}</strong><div style="font-size:0.85rem;">${escapeHtml(roleLabel)} ${u.ativo === false ? '<span style="color:#c02626;margin-left:8px">(desativado)</span>' : ''}</div>`;
+			div.appendChild(info);
+			usersListEl.appendChild(div);
+		});
+	}catch(e){ console.warn('renderRemoteUsersList exception', e); const p = document.createElement('div'); p.textContent = 'Erro ao buscar usuários remotos.'; usersListEl.appendChild(p); }
 }
 
 let editingUserEmail = null;
