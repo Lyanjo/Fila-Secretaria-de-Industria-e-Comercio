@@ -1314,6 +1314,8 @@ function showScreen(id){
 
 function handleHash(){
 	const h = location.hash.replace('#','');
+	// parar polling de dept anterior sempre que trocamos de tela
+	try{ stopDeptPolling(); }catch(_){ }
 	// checar permissões com base em state.currentUser
 	const current = state.currentUser;
 	const role = current ? current.role : null; // 'adm' or sala number
@@ -1361,12 +1363,16 @@ function handleHash(){
 		showScreen('screen-reception');
 		// atualizar contador remoto quando entramos na tela de recepção
 		if(window.supabase && window.navigator.onLine) fetchRemoteTodayCount();
+		// também atualizar filas gerais no background para manter tudo sincronizado
+		if(window.supabase && window.navigator.onLine) fetchRemoteAtendimentos().catch(()=>{});
 		currentDept = null;
 	} else if(h==='public'){
 		// painel público acessível apenas se admin ou qualquer usuário
 		showScreen('screen-public');
 		currentDept = null;
-		renderPublicPanel();
+		// atualizar filas públicas/remotas ao abrir painel público
+		if(window.supabase && window.navigator.onLine) fetchRemoteAtendimentos().then(()=>{ renderPublicPanel(); }).catch(()=>{ renderPublicPanel(); });
+		else renderPublicPanel();
 	} else if(h==='departments'){
 		// departments list: apenas adm
 		if(!role || role!=='adm'){
@@ -1374,14 +1380,16 @@ function handleHash(){
 		}
 		showScreen('screen-departments');
 		currentDept = null;
+		// garantir dados remotos atualizados
+		if(window.supabase && window.navigator.onLine) fetchRemoteAtendimentos().catch(()=>{});
 	} else if(h==='users'){
 		// tela de usuários (apenas admin)
 		if(!role || role!=='adm'){
 			location.hash = 'reception'; return;
 		}
 		showScreen('screen-users');
-		// Renderizar apenas usuários remotos (do Supabase)
-		renderRemoteUsersList();
+		// Renderizar apenas usuários remotos (do Supabase) e atualizar imediatamente
+		if(window.supabase && window.navigator.onLine) renderRemoteUsersList();
 	} else if(h.startsWith('dept-')){
 		const num = h.split('-')[1];
 		if(!num || !SALAS[num]){ location.hash = 'departments'; return; }
@@ -1396,11 +1404,13 @@ function handleHash(){
 				renderQueueForDept(num);
 				// tentar popular com dados remotos e re-renderizar
 				if(window.supabase && window.navigator.onLine){
+					// fetch immediately and then start short polling while on this screen
 					fetchRemoteAtendimentos(num).then(()=>{
 						renderQueueForDept(num);
 					}).catch(e=>{ console.warn('fetchRemoteAtendimentos failed', e); });
+					startDeptPolling(num);
 				}
-				// Nota: atualização remota é feita automaticamente ao entrar na sala via fetchRemoteAtendimentos
+				// Nota: atualização remota também será entregue via realtime quando disponível
 			// atualizar cartão 'em atendimento' para esta sala
 			renderDeptCurrentServing(num);
 		enableDeptControlsFor(num);
@@ -1648,6 +1658,31 @@ function ensureRealtimeOnReady(attempts = 10, delayMs = 1000){
 	setTimeout(()=> ensureRealtimeOnReady(attempts-1, delayMs), delayMs);
 }
 ensureRealtimeOnReady();
+
+// --- Department short-polling helpers ---
+// Quando o usuário está em um painel de departamento, fazemos polling curto para reduzir janela de estalecimento
+window._deptPollers = window._deptPollers || {};
+function startDeptPolling(dept, intervalMs = 2000){
+	try{
+		stopDeptPolling();
+	}catch(_){ }
+	if(!dept) return;
+	let id = 'dept-' + String(dept);
+	if(window._deptPollers[id]) return; // já ativo
+	const iv = setInterval(async ()=>{
+		try{ if(window.supabase && window.navigator.onLine){ await fetchRemoteAtendimentos(dept); renderQueueForDept(dept); renderDeptCurrentServing(dept); } }catch(e){ /* silent */ }
+	}, intervalMs);
+	window._deptPollers[id] = iv;
+}
+
+function stopDeptPolling(){
+	try{
+		for(const k in (window._deptPollers||{})){
+			try{ clearInterval(window._deptPollers[k]); }catch(_){ }
+			delete window._deptPollers[k];
+		}
+	}catch(_){ }
+}
 
 // --- Usuários & Auth ---
 function ensureAdminExists(){
