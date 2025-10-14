@@ -536,6 +536,8 @@ async function fetchRemoteAtendimentos(departamentoFiltro){
 		const rows = Array.isArray(data) ? data : [];
 		// mapear para state.queues por dep_direcionado (campo no banco)
 		state.queues = state.queues || {};
+		// coletar ids/tickets retornados para permitir pruning (remoção) de itens que foram concluídos
+		const fetchedBySala = {};
 		rows.forEach(r=>{
 			try{
 				const salaKey = r.dep_direcionado || '';
@@ -549,16 +551,47 @@ async function fetchRemoteAtendimentos(departamentoFiltro){
 				// se departamentoFiltro fornecido e não bate, pular
 				if(departamentoFiltro && String(departamentoFiltro) !== String(salaNum)) return;
 				if(!salaNum) return;
+				fetchedBySala[salaNum] = fetchedBySala[salaNum] || { ids: new Set(), tickets: new Set() };
+				if(r.id) fetchedBySala[salaNum].ids.add(String(r.id));
+				if(r.senha) fetchedBySala[salaNum].tickets.add(String(r.senha));
 				state.queues[salaNum] = state.queues[salaNum] || [];
 				// apenas registros com concluido == null já foram filtrados na query
 				// evitar duplicata por senha (campo senha)
-				const exists = state.queues[salaNum].some(x=> x.ticket === (r.senha || r.senha) || x.remoteId === r.id);
+				const exists = state.queues[salaNum].some(x=> x.ticket === (r.senha || '') || x.remoteId === r.id || String(x.ticket) === String(r.senha));
 				if(!exists){
 					state.queues[salaNum].push({ name: r.mucipe_nome || r.nome || '', document: r.munic_doc || '', preferencial: false, sala: parseInt(salaNum,10), ticket: r.senha || '', createdAt: r.created_at || r.createdAt, remoteId: r.id, remoteSynced: true });
 				}
 			}catch(e){ /* silent */ }
 		});
+
+		// PRUNE: remover itens locais que não aparecem mais no resultado remoto (por terem sido concluídos)
+		try{
+			// se foi fornecido filtro de departamento, limitamos a pruning àquela sala
+			if(departamentoFiltro){
+				const sala = String(departamentoFiltro);
+				const meta = fetchedBySala[sala] || { ids: new Set(), tickets: new Set() };
+				state.queues[sala] = (state.queues[sala] || []).filter(it => {
+					// manter item se não soubermos seu remoteId (legacy) OR se ele ainda está presente remotamente
+					if(it.remoteId && meta.ids.size>0){ return meta.ids.has(String(it.remoteId)); }
+					if(it.ticket && meta.tickets.size>0){ return meta.tickets.has(String(it.ticket)); }
+					// se não temos correspondência por id/ticket, conservamos por segurança
+					return true;
+				});
+			} else {
+				// para cada sala retornada, removemos itens locais que não estão na lista
+				for(const s in state.queues){
+					const meta = fetchedBySala[s] || { ids: new Set(), tickets: new Set() };
+					state.queues[s] = (state.queues[s] || []).filter(it => {
+						if(it.remoteId && meta.ids.size>0){ return meta.ids.has(String(it.remoteId)); }
+						if(it.ticket && meta.tickets.size>0){ return meta.tickets.has(String(it.ticket)); }
+						return true;
+					});
+				}
+			}
+		}catch(_){ /* silent */ }
 		saveState();
+		// se estivermos vendo a sala afetada, re-renderizar
+		try{ if(currentDept) renderQueueForDept(currentDept); renderPublicPanel(); }catch(_){ }
 		return rows;
 	}catch(e){ console.warn('fetchRemoteAtendimentos exception', e); return []; }
 }
