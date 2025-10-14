@@ -534,8 +534,9 @@ async function fetchRemoteAtendimentos(departamentoFiltro){
 		const { data, error } = await q;
 		if(error){ console.warn('fetchRemoteAtendimentos error', error); return []; }
 		const rows = Array.isArray(data) ? data : [];
-		// mapear para state.queues por dep_direcionado (campo no banco)
-		state.queues = state.queues || {};
+	// mapear para state.queues por dep_direcionado (campo no banco)
+	// NOTE: este sistema agora mantém filas por sala somente com dados REMOTOS
+	state.queues = {};
 		// coletar ids/tickets retornados para permitir pruning (remoção) de itens que foram concluídos
 		const fetchedBySala = {};
 		rows.forEach(r=>{
@@ -557,40 +558,13 @@ async function fetchRemoteAtendimentos(departamentoFiltro){
 				state.queues[salaNum] = state.queues[salaNum] || [];
 				// apenas registros com concluido == null já foram filtrados na query
 				// evitar duplicata por senha (campo senha)
-				const exists = state.queues[salaNum].some(x=> x.ticket === (r.senha || '') || x.remoteId === r.id || String(x.ticket) === String(r.senha));
-				if(!exists){
-					state.queues[salaNum].push({ name: r.mucipe_nome || r.nome || '', document: r.munic_doc || '', preferencial: false, sala: parseInt(salaNum,10), ticket: r.senha || '', createdAt: r.created_at || r.createdAt, remoteId: r.id, remoteSynced: true });
-				}
+				// Sempre re-criar a lista com base no resultado remoto (remoção de dados locais)
+				state.queues[salaNum].push({ name: r.mucipe_nome || r.nome || '', document: r.munic_doc || '', preferencial: false, sala: parseInt(salaNum,10), ticket: r.senha || '', createdAt: r.created_at || r.createdAt, remoteId: r.id, remoteSynced: true });
 			}catch(e){ /* silent */ }
 		});
-
-		// PRUNE: remover itens locais que não aparecem mais no resultado remoto (por terem sido concluídos)
-		try{
-			// se foi fornecido filtro de departamento, limitamos a pruning àquela sala
-			if(departamentoFiltro){
-				const sala = String(departamentoFiltro);
-				const meta = fetchedBySala[sala] || { ids: new Set(), tickets: new Set() };
-				state.queues[sala] = (state.queues[sala] || []).filter(it => {
-					// manter item se não soubermos seu remoteId (legacy) OR se ele ainda está presente remotamente
-					if(it.remoteId && meta.ids.size>0){ return meta.ids.has(String(it.remoteId)); }
-					if(it.ticket && meta.tickets.size>0){ return meta.tickets.has(String(it.ticket)); }
-					// se não temos correspondência por id/ticket, conservamos por segurança
-					return true;
-				});
-			} else {
-				// para cada sala retornada, removemos itens locais que não estão na lista
-				for(const s in state.queues){
-					const meta = fetchedBySala[s] || { ids: new Set(), tickets: new Set() };
-					state.queues[s] = (state.queues[s] || []).filter(it => {
-						if(it.remoteId && meta.ids.size>0){ return meta.ids.has(String(it.remoteId)); }
-						if(it.ticket && meta.tickets.size>0){ return meta.tickets.has(String(it.ticket)); }
-						return true;
-					});
-				}
-			}
-		}catch(_){ /* silent */ }
+		// garantir que estado.serving reflita registro remoto ativo (se houver) para a sala em questão
+		try{ if(!departamentoFiltro){ /* se sem filtro, não alteramos serving aqui */ } }catch(_){ }
 		saveState();
-		// se estivermos vendo a sala afetada, re-renderizar
 		try{ if(currentDept) renderQueueForDept(currentDept); renderPublicPanel(); }catch(_){ }
 		return rows;
 	}catch(e){ console.warn('fetchRemoteAtendimentos exception', e); return []; }
@@ -716,23 +690,80 @@ function renderPublicPanel(){
 function renderQueueForDept(sala){
 	if(!deptQueueList) return;
 	deptQueueList.innerHTML = '';
-	const arr = state.queues[sala] || [];
-	// badge indicando se algum item já veio do remoto
-	const hasRemote = Array.isArray(arr) && arr.some(i => i.remoteSynced || i.remoteId);
+	// usar apenas dados remotos para o painel do departamento
+	const arr = (state.queues && state.queues[sala]) ? (state.queues[sala].slice()) : [];
+	// badge indicando origem dos itens: Remoto / Local / Remoto + Local
+	const hasRemote = Array.isArray(arr) && arr.length>0; // todos são remotos
+	const hasLocal = false;
 	const badge = document.createElement('div');
 	badge.style.marginBottom = '6px';
 	badge.style.fontSize = '0.85rem';
-	badge.style.color = hasRemote ? '#065f46' : '#374151';
-	badge.textContent = hasRemote ? 'Fonte: Remoto + Local' : 'Fonte: Local';
+	let badgeText = 'Fonte: Local';
+	let badgeColor = '#374151';
+	if(hasRemote && hasLocal){ badgeText = 'Fonte: Remoto + Local'; badgeColor = '#065f46'; }
+	else if(hasRemote){ badgeText = 'Fonte: Remoto'; badgeColor = '#065f46'; }
+	else { badgeText = 'Fonte: Local'; badgeColor = '#374151'; }
+	badge.style.color = badgeColor;
+	badge.textContent = badgeText;
+	// tornar badge clicável para forçar fetch imediato quando o usuário clicar no corner badge
+	badge.style.cursor = 'pointer';
+	badge.title = 'Clique para forçar atualização remota desta sala';
+	badge.addEventListener('click', async ()=>{
+		try{
+			if(window.supabase && window.navigator.onLine){
+				await fetchRemoteAtendimentos(sala);
+				await fetchRemoteServing(sala);
+				renderQueueForDept(sala);
+				renderDeptCurrentServing(sala);
+			} else {
+				alert('Sem conexão com o Supabase.');
+			}
+		}catch(e){ console.warn('forced refresh failed', e); }
+	});
+	// posicionar no canto superior direito do container de fila
+	badge.style.position = 'absolute';
+	badge.style.right = '12px';
+	badge.style.top = '8px';
+	deptQueueList.style.position = 'relative';
 	deptQueueList.appendChild(badge);
     if(arr.length===0){ deptQueueList.innerHTML = '<p>Nenhuma pessoa na fila.</p>'; return; }
-    arr.forEach((item,idx)=>{
+	arr.forEach((item,idx)=>{
         const div = document.createElement('div');
         div.className = 'queue-item';
-		const syncBadge = item.remoteSynced ? '<span title="Sincronizado" style="color:green;margin-left:6px;">●</span>' : '<span title="Local (pendente)" style="color:#c02626;margin-left:6px;">◌</span>';
+		// todos os itens são remotos aqui; mostrar badge verde de sincronizado
+		const syncBadge = '<span title="Remoto" style="color:green;margin-left:6px;">●</span>';
 		div.innerHTML = `<div><strong>${item.name}</strong> ${item.preferencial?'<span style="color:#b45309">(P)</span>':''}<br><small>${item.document}</small></div><div>${item.ticket} ${syncBadge}</div>`;
         deptQueueList.appendChild(div);
     });
+}
+
+// buscar atendimento ativo remoto (concluido = false) para uma sala específica e atualizar state.serving
+async function fetchRemoteServing(departamentoFiltro){
+	if(!window.supabase) return null;
+	try{
+		// buscar registro marcado como em atendimento (concluido = false) para o departamento
+		const q = window.supabase.from('atendimentos').select('*').eq('concluido', false).order('inicio_atendimento', { ascending: true }).limit(1);
+		if(departamentoFiltro) q.eq('dep_direcionado', String(departamentoFiltro));
+		const { data, error } = await q;
+		if(error){ console.warn('fetchRemoteServing error', error); return null; }
+		const rows = Array.isArray(data) ? data : [];
+		if(rows.length === 0){
+			// limpar serving local para a sala
+			if(state.serving && state.serving[departamentoFiltro]){ state.serving[departamentoFiltro] = null; saveState(); }
+			return null;
+		}
+		const rec = rows[0];
+		// mapear sala
+		const salaKey = rec.dep_direcionado || '';
+		let salaNum = null;
+		if(/^[0-9]+$/.test(String(salaKey))) salaNum = String(salaKey);
+		else { for(const k in SALAS){ if(String(SALAS[k]).indexOf(salaKey)!==-1 || SALAS[k].indexOf(salaKey)!==-1) { salaNum = String(k); break; } } }
+		if(!salaNum) return null;
+		state.serving = state.serving || {};
+		state.serving[salaNum] = { name: rec.mucipe_nome || rec.nome || '', document: rec.munic_doc || '', sala: parseInt(salaNum,10), ticket: rec.senha || '', remoteId: rec.id, remoteSynced: true, inicio_atendimento: rec.inicio_atendimento || null };
+		saveState();
+		return state.serving[salaNum];
+	}catch(e){ console.warn('fetchRemoteServing exception', e); return null; }
 }
 
 // --- Current serving card for department panels ---
@@ -1703,7 +1734,14 @@ function startDeptPolling(dept, intervalMs = 2000){
 	let id = 'dept-' + String(dept);
 	if(window._deptPollers[id]) return; // já ativo
 	const iv = setInterval(async ()=>{
-		try{ if(window.supabase && window.navigator.onLine){ await fetchRemoteAtendimentos(dept); renderQueueForDept(dept); renderDeptCurrentServing(dept); } }catch(e){ /* silent */ }
+		try{ 
+			if(window.supabase && window.navigator.onLine){ 
+				await fetchRemoteAtendimentos(dept);
+				await fetchRemoteServing(dept);
+				renderQueueForDept(dept);
+				renderDeptCurrentServing(dept);
+			}
+		}catch(e){ /* silent */ }
 	}, intervalMs);
 	window._deptPollers[id] = iv;
 }
