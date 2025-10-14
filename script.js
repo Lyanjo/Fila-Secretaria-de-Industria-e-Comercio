@@ -529,7 +529,8 @@ async function fetchRemoteAtendimentos(departamentoFiltro){
 	if(!window.supabase) return [];
 	try{
 		// buscar atendimentos não concluídos (ou recentes) para popular as filas
-		const q = window.supabase.from('atendimentos').select('*').order('created_at', { ascending: true }).limit(500);
+		// buscar atendimentos que não foram concluídos (concluido IS NULL)
+		const q = window.supabase.from('atendimentos').select('*').is('concluido', null).order('created_at', { ascending: true }).limit(500);
 		const { data, error } = await q;
 		if(error){ console.warn('fetchRemoteAtendimentos error', error); return []; }
 		const rows = Array.isArray(data) ? data : [];
@@ -549,6 +550,7 @@ async function fetchRemoteAtendimentos(departamentoFiltro){
 				if(departamentoFiltro && String(departamentoFiltro) !== String(salaNum)) return;
 				if(!salaNum) return;
 				state.queues[salaNum] = state.queues[salaNum] || [];
+				// apenas registros com concluido == null já foram filtrados na query
 				// evitar duplicata por senha (campo senha)
 				const exists = state.queues[salaNum].some(x=> x.ticket === (r.senha || r.senha) || x.remoteId === r.id);
 				if(!exists){
@@ -955,6 +957,45 @@ function enableDeptControlsFor(sala){
 // Chamar próximo: preferenciais primeiro (FIFO entre preferenciais), depois não preferenciais FIFO
 async function callNextFor(sala){
     if(!sala) return;
+	// se já existe um atendimento em andamento nesta sala, concluí-lo primeiro
+	try{
+		const current = state.serving && state.serving[sala] ? state.serving[sala] : null;
+		if(current){
+			// marcar histórico de encerramento
+			const endedAt = formatLocalTimestamp();
+			state.history = state.history || [];
+			// tentar atualizar registro existente no histórico (último com mesmo ticket/sala)
+			let histIdx = -1;
+			for(let i=state.history.length-1;i>=0;i--){ if(state.history[i].ticket === current.ticket && state.history[i].sala === parseInt(sala,10)) { histIdx = i; break; } }
+			if(histIdx !== -1){ state.history[histIdx].endedAt = endedAt; }
+			else { state.history.push({ name: current.name, document: current.document || current.documento, sala: parseInt(sala,10), departamento: SALAS[sala], ticket: current.ticket, datetime: formatLocalTimestamp(current.calledAt || Date.now()), endedAt }); }
+			// tentar atualizar remoto imediatamente
+			if(window.supabase && window.navigator.onLine){
+				try{
+					if(current.remoteId){
+						const { error } = await window.supabase.from('atendimentos').update({ concluido: true }).eq('id', current.remoteId);
+						if(error){ console.warn('callNextFor: failed to mark current atendimento concluido', error); alert('Aviso: falha ao concluir atendimento no servidor.'); }
+					} else {
+						// sem remoteId, criar registro remoto marcado como concluído
+						const payload = { mucipe_nome: current.name, munic_doc: current.document || '', dep_direcionado: current.sala ? String(current.sala) : String(sala), senha: current.ticket, created_at: formatLocalTimestamp(current.createdAt || Date.now()), inicio_atendimento: current.inicio_atendimento || null, concluido: true };
+						const { data, error } = await window.supabase.from('atendimentos').insert([payload]).select().maybeSingle();
+						if(error){ console.warn('callNextFor: failed to insert concluded atendimento', error); alert('Aviso: falha ao gravar encerramento no servidor.'); }
+						else { current.remoteId = data && data.id; current.remoteSynced = true; }
+					}
+				}catch(e){ console.warn('callNextFor: exception updating current atendimento', e); alert('Erro ao comunicar com o servidor ao concluir atendimento.'); }
+			} else {
+				// modo online-only: exigir conexão
+				alert('Operação requer conexão com o servidor para concluir atendimento em andamento. Tente quando estiver online.');
+				return; // abortar chamada ao próximo até que a conclusão seja confirmada
+			}
+			// limpar atendimento local após conclusão
+			state.serving = state.serving || {};
+			state.serving[sala] = null;
+			saveState();
+			renderPublicPanel();
+			renderQueueForDept(sala);
+		}
+	}catch(err){ console.warn('Erro ao concluir atendimento atual antes de chamar próximo', err); }
     const q = state.queues[sala];
     if(!q || q.length===0){
         state.serving[sala] = null;
@@ -1000,13 +1041,14 @@ async function callNextFor(sala){
 		at.inicio_atendimento = inicioTs;
 		saveState();
 		// se existir remoteId, atualizar apenas o registro remoto
-		if(at.remoteId && window.supabase && window.navigator.onLine){
+				if(at.remoteId && window.supabase && window.navigator.onLine){
 			try{
-				const { error } = await window.supabase.from('atendimentos').update({ inicio_atendimento: inicioTs }).eq('id', at.remoteId);
-				if(error){ console.warn('update inicio_atendimento supabase failed', error); enqueueSync({ type: 'updateAtendimento', payload: { remoteId: at.remoteId, inicio_atendimento: inicioTs } }); }
-			}catch(e){ console.warn('update inicio_atendimento exception', e); enqueueSync({ type: 'updateAtendimento', payload: { remoteId: at.remoteId, inicio_atendimento: inicioTs } }); }
+				// marcar inicio e definir concluido = false para representar atendimento ativo
+				const { error } = await window.supabase.from('atendimentos').update({ inicio_atendimento: inicioTs, concluido: false }).eq('id', at.remoteId);
+				if(error){ console.warn('update inicio_atendimento supabase failed', error); enqueueSync({ type: 'updateAtendimento', payload: { remoteId: at.remoteId, inicio_atendimento: inicioTs, concluido: false } }); }
+			}catch(e){ console.warn('update inicio_atendimento exception', e); enqueueSync({ type: 'updateAtendimento', payload: { remoteId: at.remoteId, inicio_atendimento: inicioTs, concluido: false } }); }
 		} else {
-			// sem remoteId: tentar inserir um registro remoto com inicio_atendimento (se online) ou enfileirar createAtendimento com campo inicio_atendimento
+				// sem remoteId: tentar inserir um registro remoto com inicio_atendimento
 			if(window.supabase && window.navigator.onLine){
 				try{
 					const payload = { mucipe_nome: at.name, munic_doc: at.document, dep_direcionado: at.sala.toString(), senha: at.ticket, created_at: formatLocalTimestamp(at.createdAt), inicio_atendimento: inicioTs, concluido: false };
@@ -1429,34 +1471,48 @@ function setupRealtimeSync(){
 				return removed;
 			};
 
-			// INSERT: adicionar na fila se ainda não existir
+			// INSERT: novo registro criado no banco. Se concluido === null, fica na fila; se concluido === false, é atendimento ativo
 			if(event === 'INSERT' || event === 'insert'){
 				if(!salaNum) return;
 				state.queues = state.queues || {};
 				state.queues[salaNum] = state.queues[salaNum] || [];
-				const exists = state.queues[salaNum].some(x => x.remoteId === rec.id || x.ticket === (rec.senha || ''));
-				if(!exists){
-					state.queues[salaNum].push({ name: rec.mucipe_nome || rec.nome || '', document: rec.munic_doc || '', preferencial: false, sala: parseInt(salaNum,10), ticket: rec.senha || '', createdAt: rec.created_at || rec.createdAt, remoteId: rec.id, remoteSynced: true });
+				// interpretar estado do registro
+				if(typeof rec.concluido === 'undefined' || rec.concluido === null){
+					const exists = state.queues[salaNum].some(x => x.remoteId === rec.id || x.ticket === (rec.senha || ''));
+					if(!exists){
+						state.queues[salaNum].push({ name: rec.mucipe_nome || rec.nome || '', document: rec.munic_doc || '', preferencial: false, sala: parseInt(salaNum,10), ticket: rec.senha || '', createdAt: rec.created_at || rec.createdAt, remoteId: rec.id, remoteSynced: true });
+						saveState();
+						try{ if(currentDept && String(currentDept) === String(salaNum)) renderQueueForDept(salaNum); }catch(_){ }
+						renderPublicPanel();
+					}
+				} else if(rec.concluido === false){
+					// registro passou a atendimento ativo: colocar em state.serving
+					state.serving = state.serving || {};
+					state.serving[salaNum] = { name: rec.mucipe_nome || rec.nome || '', document: rec.munic_doc || '', sala: parseInt(salaNum,10), ticket: rec.senha || '', remoteId: rec.id, remoteSynced: true, inicio_atendimento: rec.inicio_atendimento || null };
 					saveState();
-					// re-render sala e painel público
-					try{ if(currentDept && String(currentDept) === String(salaNum)) renderQueueForDept(salaNum); }catch(_){}
 					renderPublicPanel();
+					if(currentDept && String(currentDept) === String(salaNum)) renderDeptCurrentServing(salaNum);
+				} else if(rec.concluido === true){
+					// concluído: remover de filas e serving
+					const removed = removeFromQueuesById(rec.id);
+					if(state.serving && state.serving[salaNum] && state.serving[salaNum].remoteId === rec.id) state.serving[salaNum] = null;
+					saveState();
+					renderPublicPanel();
+					if(currentDept) renderQueueForDept(currentDept);
 				}
 				return;
 			}
 
-			// UPDATE: tratar conclusão ou atualização de campos
+			// UPDATE: tratar atualização de estado (concluido campo) ou outras alterações
 			if(event === 'UPDATE' || event === 'update'){
-				// se concluido, remover da fila local e ajustar serving/history
-				if(typeof rec.concluido !== 'undefined' && rec.concluido){
-					// remover da fila
+				// se rec.concluido === true: registro foi concluído
+				if(typeof rec.concluido !== 'undefined' && rec.concluido === true){
 					const removed = removeFromQueuesById(rec.id);
-					// se alguém está sendo atendido com este remoteId, limpar
+					// se alguém está sendo atendido com este remoteId, mover para history e limpar
 					try{
 						for(const s in state.serving){
 							const sv = state.serving[s];
 							if(sv && (sv.remoteId === rec.id || sv.ticket === (rec.senha || ''))){
-								// adicionar ao history se não existir
 								state.history = state.history || [];
 								state.history.push({ name: sv.name, document: sv.document || sv.documento, sala: parseInt(s,10), departamento: SALAS[s], ticket: sv.ticket, datetime: sv.calledAt ? formatLocalTimestamp(sv.calledAt) : formatLocalTimestamp(), endedAt: formatLocalTimestamp() });
 								state.serving[s] = null;
@@ -1468,7 +1524,18 @@ function setupRealtimeSync(){
 					if(currentDept) renderQueueForDept(currentDept);
 					return;
 				}
-				// outra atualização: tentar atualizar item na fila/serving
+				// se rec.concluido === false: registro foi marcado como em atendimento
+				if(typeof rec.concluido !== 'undefined' && rec.concluido === false){
+					// remover da fila local (se presente) e colocar em serving
+					removeFromQueuesById(rec.id);
+					state.serving = state.serving || {};
+					state.serving[salaNum] = { name: rec.mucipe_nome || rec.nome || '', document: rec.munic_doc || '', sala: parseInt(salaNum,10), ticket: rec.senha || '', remoteId: rec.id, remoteSynced: true, inicio_atendimento: rec.inicio_atendimento || null };
+					saveState();
+					renderPublicPanel();
+					if(currentDept && String(currentDept) === String(salaNum)) renderDeptCurrentServing(salaNum);
+					return;
+				}
+				// rec.concluido é null/undefined ou outras alterações: atualizar dados na fila/serving
 				try{
 					state.queues = state.queues || {};
 					let changed = false;
@@ -1484,7 +1551,7 @@ function setupRealtimeSync(){
 					for(const s in state.serving){
 						const sv = state.serving[s];
 						if(sv && (sv.remoteId === rec.id || sv.ticket === (rec.senha || ''))){
-							sv.remoteSynced = true; sv.remoteId = rec.id; sv.name = rec.mucipe_nome || sv.name; sv.document = rec.munic_doc || sv.document;
+							sv.remoteSynced = true; sv.remoteId = rec.id; sv.name = rec.mucipe_nome || sv.name; sv.document = rec.munic_doc || sv.document; sv.inicio_atendimento = rec.inicio_atendimento || sv.inicio_atendimento;
 							changed = true;
 						}
 					}
