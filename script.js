@@ -457,7 +457,8 @@ async function updateUserRemote(originalEmail, changes){
 			// não encontrou: tentar inserir como novo (usando email de changes ou original)
 			const insertPayload = {};
 			insertPayload.email = (changes && changes.email) ? changes.email : originalEmail;
-			if(changes && typeof changes.password !== 'undefined') insertPayload.senha_hash = changes.password || '';
+			// garantir valor não-nulo para senha_hash para evitar violação de constraint NOT NULL
+			insertPayload.senha_hash = (changes && typeof changes.password !== 'undefined') ? (changes.password || '') : '';
 			if(changes && typeof changes.role !== 'undefined') insertPayload.departamento = roleToDbDept(changes.role);
 			if(changes && typeof changes.ultimo_login !== 'undefined') insertPayload.ultimo_login = changes.ultimo_login;
 			insertPayload.ativo = true;
