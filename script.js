@@ -760,10 +760,45 @@ async function fetchRemoteServing(departamentoFiltro){
 		else { for(const k in SALAS){ if(String(SALAS[k]).indexOf(salaKey)!==-1 || SALAS[k].indexOf(salaKey)!==-1) { salaNum = String(k); break; } } }
 		if(!salaNum) return null;
 		state.serving = state.serving || {};
-		state.serving[salaNum] = { name: rec.mucipe_nome || rec.nome || '', document: rec.munic_doc || '', sala: parseInt(salaNum,10), ticket: rec.senha || '', remoteId: rec.id, remoteSynced: true, inicio_atendimento: rec.inicio_atendimento || null };
+		// merge: preservar campos locais (endereco, bairro, cidade, telefone) quando presentes
+		const existing = state.serving[salaNum] || {};
+		existing.name = rec.mucipe_nome || rec.nome || existing.name || '';
+		existing.document = rec.munic_doc || existing.document || '';
+		existing.sala = parseInt(salaNum,10);
+		existing.ticket = rec.senha || existing.ticket || '';
+		existing.remoteId = rec.id || existing.remoteId;
+		existing.remoteSynced = true;
+		existing.inicio_atendimento = rec.inicio_atendimento || existing.inicio_atendimento || null;
+		// salvar preliminarmente e tentar enriquecer com dados da tabela municipes
+		state.serving[salaNum] = existing;
 		saveState();
+		// tentar buscar dados do munícipe pelo documento para preencher endereco/bairro/telefone
+		try{
+			if(existing.document){
+				const muni = await fetchMunicipeByDocument(existing.document);
+				if(muni){
+					existing.endereco = muni.endereco || existing.endereco || '';
+					existing.bairro = muni.bairro || existing.bairro || '';
+					existing.cidade = muni.cidade || existing.cidade || '';
+					existing.telefone = muni.telefone || existing.telefone || '';
+					// atualizar estado com os dados do DB
+					state.serving[salaNum] = existing;
+					saveState();
+				}
+			}
+		}catch(_){ /* ignore */ }
 		return state.serving[salaNum];
 	}catch(e){ console.warn('fetchRemoteServing exception', e); return null; }
+}
+
+// busca munícipe por documento na tabela 'municipes'
+async function fetchMunicipeByDocument(documento){
+	if(!window.supabase || !documento) return null;
+	try{
+		const { data, error } = await window.supabase.from('municipes').select('*').eq('documento', String(documento)).limit(1).maybeSingle();
+		if(error){ console.warn('fetchMunicipeByDocument error', error); return null; }
+		return data || null;
+	}catch(e){ console.warn('fetchMunicipeByDocument exception', e); return null; }
 }
 
 // --- Current serving card for department panels ---
@@ -1191,14 +1226,16 @@ if(receptionForm){
     	const ticket = formatTicket(state.lastTicket, sala);
     	const entry = { id: state.lastTicket, name, document: documentEl, preferencial, sala, ticket, createdAt: Date.now() };
 
-    	// inserir: se preferencial, inserir antes do primeiro não preferencial (mas depois de outros preferenciais)
-    	if(preferencial){
-			const q = state.queues[sala];
+		// inserir: manipular uma cópia local da fila e só depois reatribuir para evitar condições de corrida com polling
+		let q = state.queues[sala] || [];
+		if(preferencial){
 			let idx = q.findIndex(x=>!x.preferencial);
 			if(idx===-1) q.push(entry); else q.splice(idx,0,entry);
-    	} else {
-			state.queues[sala].push(entry);
-    	}
+		} else {
+			q.push(entry);
+		}
+		// garantir reatribuição ao estado (caso polling tenha reiniciado state.queues)
+		state.queues[sala] = q;
 
     				saveState();
     					saveState();
