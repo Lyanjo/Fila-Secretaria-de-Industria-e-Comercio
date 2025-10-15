@@ -371,6 +371,37 @@ async function processSyncQueue(){
 				if(idx!==-1) state.syncQueue.splice(idx,1);
 				saveState();
 			}catch(e){
+				// Tratar casos conhecidos: violação NOT NULL em senha_hash (Postgres 23502)
+				try{
+					if(e && e.code === '23502' && String(e.message || '').indexOf('senha_hash')!==-1){
+						console.warn('processSyncQueue detected senha_hash NOT NULL violation — attempting auto-fix for op', op);
+						// para operações de usuário, forçar senha vazia e tentar uma vez
+						if(op.type === 'createUser'){
+							op.payload.password = op.payload.password || ''; // garantir
+							try{
+								const payload = { email: op.payload.email, senha_hash: op.payload.password || '', departamento: roleToDbDept(op.payload.role), ativo: true };
+								const { error: insErr } = await window.supabase.from('login_usuarios').insert([payload]);
+								if(!insErr){
+									const idx = state.syncQueue.findIndex(x=>x===op); if(idx!==-1) state.syncQueue.splice(idx,1); saveState();
+									console.info('processSyncQueue: createUser auto-fix succeeded, op removed from queue', op);
+									continue; // prosseguir para próxima op
+								}
+							}catch(reTryErr){ console.warn('processSyncQueue createUser auto-fix failed', reTryErr); }
+						} else if(op.type === 'updateUser'){
+							// se updateUser falhou ao inserir por não encontrar existing, forçar insert com senha vazia
+							const p = op.payload || {};
+							const changes = p.changes || {};
+							const email = p.originalEmail;
+							try{
+								const insertPayload = { email: (changes && changes.email) ? changes.email : email, senha_hash: (changes && typeof changes.password !== 'undefined') ? (changes.password || '') : '' };
+								if(changes && typeof changes.role !== 'undefined') insertPayload.departamento = roleToDbDept(changes.role);
+								insertPayload.ativo = (typeof changes.ativo !== 'undefined') ? changes.ativo : true;
+								const { error: insErr } = await window.supabase.from('login_usuarios').insert([insertPayload]);
+								if(!insErr){ const idx = state.syncQueue.findIndex(x=>x===op); if(idx!==-1) state.syncQueue.splice(idx,1); saveState(); console.info('processSyncQueue: updateUser auto-fix (insert) succeeded, op removed', op); continue; }
+							}catch(reTryErr){ console.warn('processSyncQueue updateUser auto-fix failed', reTryErr); }
+						}
+					}
+				}catch(_){ /* ignore */ }
 				console.warn('sync op failed, keeping in queue', op, e);
 				// não remover, tentar novamente depois
 			}
