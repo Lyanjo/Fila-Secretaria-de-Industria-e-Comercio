@@ -1183,17 +1183,21 @@ if(receptionForm){
     	const sala = (document.getElementById('sala') || {}).value;
     	if(!name || !documentEl || !sala){ alert('Preencha todos os campos.'); return; }
 
-    	state.lastTicket = (state.lastTicket || 0) + 1;
+		// garantir estrutura de filas em memória para a sala (evita push em undefined)
+		state.queues = state.queues || {};
+		state.queues[sala] = state.queues[sala] || [];
+
+		state.lastTicket = (state.lastTicket || 0) + 1;
     	const ticket = formatTicket(state.lastTicket, sala);
     	const entry = { id: state.lastTicket, name, document: documentEl, preferencial, sala, ticket, createdAt: Date.now() };
 
     	// inserir: se preferencial, inserir antes do primeiro não preferencial (mas depois de outros preferenciais)
     	if(preferencial){
-    		const q = state.queues[sala];
-    		let idx = q.findIndex(x=>!x.preferencial);
-    		if(idx===-1) q.push(entry); else q.splice(idx,0,entry);
+			const q = state.queues[sala];
+			let idx = q.findIndex(x=>!x.preferencial);
+			if(idx===-1) q.push(entry); else q.splice(idx,0,entry);
     	} else {
-    		state.queues[sala].push(entry);
+			state.queues[sala].push(entry);
     	}
 
     				saveState();
