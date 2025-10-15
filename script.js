@@ -875,51 +875,59 @@ function onCompleteClick(e){
 	`;
 	card.appendChild(editBox);
 	// handlers
+	// pausar polling da sala enquanto o operador está editando para evitar fechamento do form
+	try{ pauseDeptPolling(sala); }catch(_){ }
 	const btnCancel = editBox.querySelector('.btn-cancel-complete');
 	const btnSave = editBox.querySelector('.btn-save-complete');
-	if(btnCancel) btnCancel.addEventListener('click', ()=>{ editBox.remove(); });
+	if(btnCancel) btnCancel.addEventListener('click', ()=>{ try{ resumeDeptPolling(sala); }catch(_){ } editBox.remove(); });
 	if(btnSave) btnSave.addEventListener('click', async ()=>{
 		// coletar dados
-		const doc = editBox.querySelector('.cmp-document').value.trim();
-		const endereco = editBox.querySelector('.cmp-endereco').value.trim();
-		const bairro = editBox.querySelector('.cmp-bairro').value.trim();
-		const cidade = editBox.querySelector('.cmp-cidade').value.trim();
-		const telefone = editBox.querySelector('.cmp-telefone').value.trim();
-		// atualizar state.municipes / serving
-		state.municipes = state.municipes || [];
-		let muni = null;
-		// tentar achar por documento
-		if(doc) muni = state.municipes.find(m=>m.documento === doc || m.documento === (serving.document || serving.documento));
-		if(!muni && serving){
-			muni = state.municipes.find(m=>m.documento === (serving.document || serving.documento));
-		}
-		if(!muni){
-			muni = { nome: serving.name || serving.nome || '', documento: doc || (serving.document||serving.documento||''), preferencial: !!serving.preferencial };
-			state.municipes.push(muni);
-		}
-		muni.endereco = endereco;
-		muni.bairro = bairro;
-		muni.cidade = cidade;
-		muni.telefone = telefone;
-		saveState();
-		// atualizar serving também
-		serving.endereco = endereco; serving.bairro = bairro; serving.cidade = cidade; serving.telefone = telefone;
-		state.serving = state.serving || {};
-		state.serving[sala] = serving;
-		saveState();
-		// tentar enviar ao Supabase (upsert na tabela municipes)
+		let doc, endereco, bairro, cidade, telefone, muni;
 		try{
-			await updateMunicipeDetails(muni);
-			alert('Dados atualizados com sucesso.');
-			// re-render cartão
-			const old = document.querySelector('.current-serving.dept-panel'); if(old) old.remove();
-			renderDeptCurrentServing(sala);
-		}catch(e){
-			console.warn('updateMunicipeDetails failed', e);
-			alert('Atualização falhou — dados salvos localmente e serão sincronizados.');
-			// se erro de permissão (401) ou RLS (42501), enfileirar para tentar depois
-			if(!muni.localId) muni.localId = 'local-' + Date.now() + '-' + Math.floor(Math.random()*1000);
-			enqueueSync({ type: 'createMunicipe', payload: { name: muni.nome, document: muni.documento, preferencial: !!muni.preferencial, localId: muni.localId } });
+			doc = editBox.querySelector('.cmp-document').value.trim();
+			endereco = editBox.querySelector('.cmp-endereco').value.trim();
+			bairro = editBox.querySelector('.cmp-bairro').value.trim();
+			cidade = editBox.querySelector('.cmp-cidade').value.trim();
+			telefone = editBox.querySelector('.cmp-telefone').value.trim();
+			// atualizar state.municipes / serving
+			state.municipes = state.municipes || [];
+			muni = null;
+			// tentar achar por documento
+			if(doc) muni = state.municipes.find(m=>m.documento === doc || m.documento === (serving.document || serving.documento));
+			if(!muni && serving){
+				muni = state.municipes.find(m=>m.documento === (serving.document || serving.documento));
+			}
+			if(!muni){
+				muni = { nome: serving.name || serving.nome || '', documento: doc || (serving.document||serving.documento||''), preferencial: !!serving.preferencial };
+				state.municipes.push(muni);
+			}
+			muni.endereco = endereco;
+			muni.bairro = bairro;
+			muni.cidade = cidade;
+			muni.telefone = telefone;
+			saveState();
+			// atualizar serving também
+			serving.endereco = endereco; serving.bairro = bairro; serving.cidade = cidade; serving.telefone = telefone;
+			state.serving = state.serving || {};
+			state.serving[sala] = serving;
+			saveState();
+			// tentar enviar ao Supabase (upsert na tabela municipes)
+			try{
+				await updateMunicipeDetails(muni);
+				alert('Dados atualizados com sucesso.');
+				// re-render cartão
+				const old = document.querySelector('.current-serving.dept-panel'); if(old) old.remove();
+				renderDeptCurrentServing(sala);
+			}catch(e){
+				console.warn('updateMunicipeDetails failed', e);
+				alert('Atualização falhou — dados salvos localmente e serão sincronizados.');
+				// se erro de permissão (401) ou RLS (42501), enfileirar para tentar depois
+				if(!muni.localId) muni.localId = 'local-' + Date.now() + '-' + Math.floor(Math.random()*1000);
+				enqueueSync({ type: 'createMunicipe', payload: { name: muni.nome, document: muni.documento, preferencial: !!muni.preferencial, localId: muni.localId } });
+			}
+		}finally{
+			// sempre retomar o polling da sala ao finalizar (sucesso ou falha)
+			try{ resumeDeptPolling(sala); }catch(_){ }
 		}
 	});
 }
@@ -1751,6 +1759,35 @@ function stopDeptPolling(){
 		for(const k in (window._deptPollers||{})){
 			try{ clearInterval(window._deptPollers[k]); }catch(_){ }
 			delete window._deptPollers[k];
+		}
+	}catch(_){ }
+}
+
+// Pause / resume helpers: pausam polling para uma sala específica sem apagar a intenção de polling
+window._deptPollersPaused = window._deptPollersPaused || {};
+function pauseDeptPolling(dept){
+	if(!dept) return;
+	const id = 'dept-' + String(dept);
+	try{
+		if(window._deptPollers && window._deptPollers[id]){
+			clearInterval(window._deptPollers[id]);
+			delete window._deptPollers[id];
+			window._deptPollersPaused[id] = true;
+		} else {
+			// marcar como pausada mesmo se não houver interval ativo
+			window._deptPollersPaused[id] = true;
+		}
+	}catch(_){ window._deptPollersPaused[id] = true; }
+}
+
+function resumeDeptPolling(dept){
+	if(!dept) return;
+	const id = 'dept-' + String(dept);
+	try{
+		if(window._deptPollersPaused && window._deptPollersPaused[id]){
+			delete window._deptPollersPaused[id];
+			// iniciar polling novamente para a sala
+			startDeptPolling(dept);
 		}
 	}catch(_){ }
 }
