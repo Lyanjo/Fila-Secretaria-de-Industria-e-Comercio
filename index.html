@@ -80,16 +80,28 @@
 					<div id="ticketIssued" class="ticket-issued" aria-live="polite"></div>
 				</div>
 
-				<!-- Direita: Pré-cadastro permanente -->
+				<!-- Direita: Cadastro permanente -->
 				<div>
 					<div class="card" style="padding:14px;">
-						<h3>Pré-cadastro</h3>
+						<h3>Cadastro</h3>
 						<form id="preCadastroForm">
 							<label>Nome<br>
 								<input type="text" id="pre_nome" required>
 							</label>
 							<label>Documento<br>
 								<input type="text" id="pre_documento" required>
+							</label>
+							<label>Endereço (Rua)<br>
+								<input type="text" id="pre_rua">
+							</label>
+							<label>Bairro<br>
+								<input type="text" id="pre_bairro">
+							</label>
+							<label>Cidade<br>
+								<input type="text" id="pre_cidade">
+							</label>
+							<label>Telefone<br>
+								<input type="text" id="pre_telefone">
 							</label>
 							<label>Preferencial
 								<input type="checkbox" id="pre_preferencial">
@@ -127,7 +139,6 @@
 		<section class="screen card hidden" id="screen-public">
 			<h2>Painel Público (em atendimento)</h2>
 			<div id="panelGrid" class="panel-grid"></div>
-			<button id="btnClearPanels" class="btn-danger" title="Limpar todos os painéis">Limpar painéis</button>
 		</section>
 
 		<!-- Tela lista de departamentos -->
