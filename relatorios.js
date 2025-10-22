@@ -160,9 +160,10 @@ async function getReportRows(){
 				};
 			});
 			// Filtrar localmente usando exclusivamente created_at (apenas data, sem horário)
-			const start = from ? new Date(from.getFullYear(), from.getMonth(), from.getDate()) : null;
-			// Ajuste intencional: para o filtro 'data fim' aplicamos um deslocamento de +1 dia
-			// Assim, se o usuário informar 09/10, o sistema usará 10/10 como fim (comportamento de máscara solicitado)
+			// Aplicar o mesmo comportamento de máscara ao Data Início: usar Start+1 dia como início efetivo da busca
+			// Assim, se o usuário informar 09/10 no campo 'Data Início', a busca usará 10/10 como limite inferior
+			const start = from ? new Date(from.getFullYear(), from.getMonth(), from.getDate() + 1) : null;
+			// Ajuste intencional também para o filtro 'Data Fim': usar End+1 dia como limite superior (mascara consistente)
 			const end = to ? new Date(to.getFullYear(), to.getMonth(), to.getDate() + 1) : null; // date-only adjusted
 			const filtered = rows.filter(r=>{
 				if(!r.datetime) return false;

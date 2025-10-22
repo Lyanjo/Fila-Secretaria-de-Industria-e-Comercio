@@ -1026,15 +1026,92 @@ function playNotifySound(){
 	}catch(e){ console.warn('playNotifySound failed', e); }
 }
 
-// piscar título da página brevemente para chamar atenção
-function blinkTitle(times = 6, interval = 400){
+// Fallbacks e utilitários para badge (Decorator na barra de tarefas/PWA)
+function setAppBadge(count){
 	try{
+		if('setAppBadge' in navigator){
+			navigator.setAppBadge(typeof count === 'number' ? count : 1).catch(()=>{});
+			return;
+		}
+		if('setClientBadge' in navigator){ // older naming in some implementations
+			navigator.setClientBadge(typeof count === 'number' ? count : 1).catch(()=>{});
+			return;
+		}
+	}catch(e){ /* ignore */ }
+}
+
+function clearAppBadge(){
+	try{
+		if('clearAppBadge' in navigator){ navigator.clearAppBadge().catch(()=>{}); return; }
+		if('clearClientBadge' in navigator){ navigator.clearClientBadge().catch(()=>{}); return; }
+	}catch(e){ /* ignore */ }
+}
+
+// Favicon badge fallback: desenha um pequeno ponto vermelho sobre o favicon e troca o link
+let __originalFaviconHref = null;
+function setFaviconBadge(){
+	try{
+		const link = document.querySelector('link[rel~="icon"]');
+		if(!link){ return; }
+		if(!__originalFaviconHref) __originalFaviconHref = link.href;
+		const img = document.createElement('img');
+		img.crossOrigin = 'anonymous';
+		img.src = __originalFaviconHref;
+		img.onload = function(){
+			try{
+				const canvas = document.createElement('canvas');
+				const size = 32;
+				canvas.width = size; canvas.height = size;
+				const ctx = canvas.getContext('2d');
+				ctx.drawImage(img, 0, 0, size, size);
+				// desenhar círculo vermelho no canto superior direito
+				ctx.beginPath();
+				ctx.arc(size - 8, 8, 6, 0, Math.PI * 2);
+				ctx.fillStyle = '#ff3b30';
+				ctx.fill();
+				const url = canvas.toDataURL('image/png');
+				// substituir link favicon
+				let newLink = document.querySelector('link[rel~="icon"][data-generated]');
+				if(newLink) newLink.href = url; else {
+					newLink = document.createElement('link');
+					newLink.rel = 'icon'; newLink.href = url; newLink.setAttribute('data-generated','1');
+					document.head.appendChild(newLink);
+				}
+			}catch(e){ /* ignore */ }
+		};
+		img.onerror = function(){ /* ignore */ };
+	}catch(e){ /* ignore */ }
+}
+
+function clearFaviconBadge(){
+	try{
+		const gen = document.querySelector('link[rel~="icon"][data-generated]');
+		if(gen) gen.remove();
+		const link = document.querySelector('link[rel~="icon"]');
+		if(link && __originalFaviconHref) link.href = __originalFaviconHref;
+	}catch(e){ /* ignore */ }
+}
+
+function clearAllBadges(){ clearAppBadge(); clearFaviconBadge(); }
+
+// limpar badges quando o usuário foca a janela ou quando a visibilidade volta
+window.addEventListener('focus', ()=>{ try{ clearAllBadges(); }catch(_){ } });
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) try{ clearAllBadges(); }catch(_){ } });
+
+// piscar título da página brevemente para chamar atenção
+function blinkTitle(times = 8, interval = 400){
+	try{
+		// times representa quantas *piscadas* (trocas). Para manter comportamento anterior compatível,
+		// usamos o número de piscadas desejado. Cada ciclo alterna entre alerta e título original.
 		const original = document.title;
 		let t = 0;
 		const iv = setInterval(()=>{
 			document.title = (t % 2 === 0) ? '🔔 Novo na fila!' : original;
 			t++;
-			if(t >= times){ clearInterval(iv); document.title = original; }
+			if(t >= (times * 2)) { // garantir que façamos 'times' piscadas visíveis
+				clearInterval(iv);
+				document.title = original;
+			}
 		}, interval);
 	}catch(e){ /* ignore */ }
 }
@@ -1051,10 +1128,12 @@ function triggerArrivalNotification(sala, person){
 			// tentar pedir permissão (não await para não bloquear)
 			requestNotificationPermission();
 		}
-		// som
-		playNotifySound();
+		// som: tocar duas vezes com pequeno atraso
+		try{ playNotifySound(); setTimeout(()=>{ try{ playNotifySound(); }catch(_){ } }, 250); }catch(_){ }
 		// piscar título
 		blinkTitle();
+		// badge na barra/tabs (PWA Badge API) e fallback de favicon
+		try{ setAppBadge(1); setFaviconBadge(); }catch(e){/* ignore */}
 		// se a janela não estiver visível, tentar trazer atenção (foco) - não funciona em todos os browsers
 		try{ if(document.hidden) window.focus(); }catch(_){ }
 	}catch(e){ console.warn('triggerArrivalNotification failed', e); }
