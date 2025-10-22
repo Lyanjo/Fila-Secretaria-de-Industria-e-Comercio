@@ -42,6 +42,18 @@ function ensureDailyCounts(){
 	if(!state.dailyCounts[k]) state.dailyCounts[k] = 0;
 }
 
+// --- Daily ticket reset helpers ---
+function ensureDailyTicketReset(){
+	state.lastTicketDate = state.lastTicketDate || null;
+	const today = getTodayKey();
+	if(state.lastTicketDate !== today){
+		// resetar contagem diária
+		state.lastTicket = 0;
+		state.lastTicketDate = today;
+		saveState();
+	}
+}
+
 function incrementDailyCount(){
 	ensureDailyCounts();
 	const k = getTodayKey();
@@ -434,6 +446,38 @@ async function fetchRemoteUsers(){
 				state.users.push({ email, password: '', role, remoteId: u.id, ativo: u.ativo });
 			}
 		});
+
+		// --- marcar preferenciais consultando tabela municipes por documento ---
+		try{
+			// coletar documentos únicos retornados
+			const documentos = new Set();
+			for(const s in state.queues){
+				for(const it of (state.queues[s]||[])){
+					if(it.document) documentos.add(String(it.document));
+				}
+			}
+			const docsArr = Array.from(documentos).filter(Boolean);
+			if(docsArr.length>0 && window.supabase){
+				const { data: munData, error: munErr } = await window.supabase.from('municipes').select('documento,preferencial').in('documento', docsArr).limit(1000);
+				if(!munErr && Array.isArray(munData)){
+					const prefMap = {};
+					munData.forEach(m => { if(m && m.documento) prefMap[String(m.documento)] = !!m.preferencial; });
+					// aplicar flags nas filas e ordenar preferenciais primeiro
+					for(const s in state.queues){
+						const arr = state.queues[s] || [];
+						arr.forEach(it => { if(it && it.document && prefMap.hasOwnProperty(String(it.document))){ it.preferencial = !!prefMap[String(it.document)]; } });
+						arr.sort((a,b)=>{
+							const pa = a.preferencial ? 0 : 1;
+							const pb = b.preferencial ? 0 : 1;
+							if(pa !== pb) return pa - pb;
+							const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+							const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+							return ta - tb;
+						});
+					}
+				}
+			}
+		}catch(e){ console.warn('marking preferentials failed', e); }
 		saveState();
 	}catch(e){ console.warn('fetchRemoteUsers exception', e); }
 }
@@ -594,6 +638,33 @@ async function fetchRemoteAtendimentos(departamentoFiltro){
 				state.queues[salaNum].push({ name: r.mucipe_nome || r.nome || '', document: r.munic_doc || '', preferencial: false, sala: parseInt(salaNum,10), ticket: r.senha || '', createdAt: r.created_at || r.createdAt, remoteId: r.id, remoteSynced: true });
 			}catch(e){ /* silent */ }
 		});
+		// após popular as filas, tentar enriquecer cada item com sinalizador 'preferencial' consultando a tabela municipes
+		try{
+			// coletar documentos presentes nas filas
+			const docs = new Set();
+			for(const s in state.queues){
+				(state.queues[s]||[]).forEach(it=>{ if(it && it.document) docs.add(String(it.document)); });
+			}
+			if(docs.size > 0 && window.supabase){
+				const docArr = Array.from(docs);
+				try{
+					const { data: muniRows, error: muniErr } = await window.supabase.from('municipes').select('documento,preferencial').in('documento', docArr);
+					if(!muniErr && Array.isArray(muniRows)){
+						const prefMap = {};
+						muniRows.forEach(r=>{ prefMap[String(r.documento)] = !!r.preferencial; });
+						// aplicar preferencial e ordenar filas (preferenciais primeiro, mantendo FIFO dentro do grupo)
+						for(const s in state.queues){
+							(state.queues[s]||[]).forEach(it=>{ it.preferencial = !!prefMap[String(it.document)]; });
+							state.queues[s].sort((a,b)=>{
+								if((a.preferencial?1:0) !== (b.preferencial?1:0)) return (b.preferencial?1:0) - (a.preferencial?1:0);
+								// fallback para createdAt comparation
+								return (a.createdAt || 0) - (b.createdAt || 0);
+							});
+						}
+					}
+				}catch(e){ console.warn('fetchRemoteAtendimentos: municipes lookup failed', e); }
+			}
+		}catch(e){ /* ignore enrichment errors */ }
 		// garantir que estado.serving reflita registro remoto ativo (se houver) para a sala em questão
 		try{ if(!departamentoFiltro){ /* se sem filtro, não alteramos serving aqui */ } }catch(_){ }
 		saveState();
@@ -719,9 +790,51 @@ function renderPublicPanel(){
 	}
 }
 
+// fetch para popular o painel público: procurar atendimentos com concluido = false e mapear por dep_direcionado
+async function fetchRemotePublicPanel(){
+	if(!window.supabase) return;
+	try{
+		const q = window.supabase.from('atendimentos').select('*').eq('concluido', false).order('inicio_atendimento', { ascending: true }).limit(500);
+		const { data, error } = await q;
+		if(error){ console.warn('fetchRemotePublicPanel error', error); return; }
+		const rows = Array.isArray(data) ? data : [];
+		// resetar serving temporariamente
+		state.serving = state.serving || {};
+		// preencher com nulls para evitar mostrar undefined
+		for(let i=1;i<=NUM_SALAS;i++) state.serving[i] = state.serving[i] || null;
+		rows.forEach(r=>{
+			try{
+				const salaKey = r.dep_direcionado || '';
+				let salaNum = null;
+				if(/^[0-9]+$/.test(String(salaKey))) salaNum = String(salaKey);
+				else { for(const k in SALAS){ if(String(SALAS[k]).indexOf(salaKey)!==-1 || SALAS[k].indexOf(salaKey)!==-1) { salaNum = String(k); break; } } }
+				if(!salaNum) return;
+				// criar display: nome — senha
+				const name = r.mucipe_nome || r.nome || '';
+				const ticket = r.senha || '';
+				const display = `${name} — ${ticket}`;
+				state.serving[parseInt(salaNum,10)] = { name, ticket, display, remoteId: r.id, inicio_atendimento: r.inicio_atendimento || null };
+			}catch(e){ /* ignore */ }
+		});
+		saveState();
+		renderPublicPanel();
+	}catch(e){ console.warn('fetchRemotePublicPanel exception', e); }
+}
+
+// polling helpers para painel público
+let _publicPollingId = null;
+function startPublicPolling(intervalMs = 5000){
+	try{ stopPublicPolling(); }catch(_){ }
+	_publicPollingId = setInterval(()=>{ try{ if(window.supabase && window.navigator.onLine) fetchRemotePublicPanel(); }catch(_){ } }, intervalMs);
+}
+function stopPublicPolling(){ if(_publicPollingId){ clearInterval(_publicPollingId); _publicPollingId = null; } }
+
 function renderQueueForDept(sala){
 	if(!deptQueueList) return;
 	deptQueueList.innerHTML = '';
+
+	// inicializar estrutura auxiliar para detectar transições de tamanho
+	state._lastRenderedQueueSize = state._lastRenderedQueueSize || {};
 	// usar apenas dados remotos para o painel do departamento
 	const arr = (state.queues && state.queues[sala]) ? (state.queues[sala].slice()) : [];
 	// badge indicando origem dos itens: Remoto / Local / Remoto + Local
@@ -758,13 +871,34 @@ function renderQueueForDept(sala){
 	badge.style.top = '8px';
 	deptQueueList.style.position = 'relative';
 	deptQueueList.appendChild(badge);
-    if(arr.length===0){ deptQueueList.innerHTML = '<p>Nenhuma pessoa na fila.</p>'; return; }
+	if(arr.length===0){ 
+		deptQueueList.innerHTML = '<p>Nenhuma pessoa na fila.</p>'; 
+		// salvar tamanho atual
+		state._lastRenderedQueueSize[sala] = 0;
+		saveState();
+		return; 
+	}
+
+	// detectar transição: vazio -> chegou alguém
+	const prevSize = state._lastRenderedQueueSize[sala] || 0;
+	const newSize = arr.length;
+	if(prevSize === 0 && newSize > 0){
+		// somente notificar se o usuário está visualizando esta sala
+		if(String(currentDept) === String(sala)){
+			triggerArrivalNotification(sala, arr[0]);
+		}
+	}
+	// atualizar tamanho armazenado
+	state._lastRenderedQueueSize[sala] = newSize;
+	saveState();
 	arr.forEach((item,idx)=>{
-        const div = document.createElement('div');
-        div.className = 'queue-item';
-		// todos os itens são remotos aqui; mostrar badge verde de sincronizado
-		const syncBadge = '<span title="Remoto" style="color:green;margin-left:6px;">●</span>';
-		div.innerHTML = `<div><strong>${item.name}</strong> ${item.preferencial?'<span style="color:#b45309">(P)</span>':''}<br><small>${item.document}</small></div><div>${item.ticket} ${syncBadge}</div>`;
+	const div = document.createElement('div');
+	div.className = 'queue-item';
+	// todos os itens são remotos aqui; mostrar badge verde de sincronizado
+	const syncBadge = '<span title="Remoto" style="color:green;margin-left:6px;">●</span>';
+	// preferencial: pequeno badge amarelo 'P'
+	const prefBadge = item.preferencial ? '<span title="Preferencial" style="background:#facc15;color:#92400e;border-radius:3px;padding:2px 4px;margin-left:6px;font-weight:600;font-size:0.8rem;">P</span>' : '';
+	div.innerHTML = `<div><strong>${item.name}</strong> ${prefBadge}<br><small>${item.document}</small></div><div>${item.ticket} ${syncBadge}</div>`;
         deptQueueList.appendChild(div);
     });
 }
@@ -851,6 +985,81 @@ function formatLocalTimestamp(input){
 	return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
+// --- Notificações visuais / sonoras para chegada de pessoas na fila ---
+// solicitar permissão de Notification API quando possível
+async function requestNotificationPermission(){
+	try{
+		if('Notification' in window && Notification.permission !== 'granted'){
+			await Notification.requestPermission();
+		}
+	}catch(e){ console.warn('requestNotificationPermission failed', e); }
+}
+
+// tocar som simples usando Audio() com base64 data-uri (pequeno bip)
+function playNotifySound(){
+	try{
+		// beep simples (sine) gerado via WebAudio para evitar depender de arquivos
+		if(window.AudioContext || window.webkitAudioContext){
+			const AC = window.AudioContext || window.webkitAudioContext;
+			const ctx = new AC();
+			const o = ctx.createOscillator();
+			const g = ctx.createGain();
+			o.type = 'sine';
+			o.frequency.value = 880; // A5
+			g.gain.value = 0.0001;
+			o.connect(g);
+			g.connect(ctx.destination);
+			// envelope
+			const now = ctx.currentTime;
+			g.gain.setValueAtTime(0.0001, now);
+			g.gain.exponentialRampToValueAtTime(0.08, now + 0.01);
+			o.start(now);
+			g.gain.exponentialRampToValueAtTime(0.0001, now + 0.4);
+			o.stop(now + 0.45);
+			// fechar contexto depois
+			setTimeout(()=>{ try{ ctx.close(); }catch(_){ } }, 700);
+			return;
+		}
+		// fallback: simples beep via Audio com data-uri (silencioso se bloqueado)
+		const beep = new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=');
+		beep.play().catch(()=>{});
+	}catch(e){ console.warn('playNotifySound failed', e); }
+}
+
+// piscar título da página brevemente para chamar atenção
+function blinkTitle(times = 6, interval = 400){
+	try{
+		const original = document.title;
+		let t = 0;
+		const iv = setInterval(()=>{
+			document.title = (t % 2 === 0) ? '🔔 Novo na fila!' : original;
+			t++;
+			if(t >= times){ clearInterval(iv); document.title = original; }
+		}, interval);
+	}catch(e){ /* ignore */ }
+}
+
+// disparar notificação (visual + sonora + foco) quando alguém chega
+function triggerArrivalNotification(sala, person){
+	try{
+		const title = `Novo na fila — Sala ${sala}`;
+		const body = person ? `${person.name} — ${person.ticket}` : 'Há uma pessoa na fila.';
+		// Notification API
+		if('Notification' in window && Notification.permission === 'granted'){
+			try{ new Notification(title, { body, tag: `arrival-dept-${sala}` }); }catch(e){ console.warn('Notification failed', e); }
+		} else {
+			// tentar pedir permissão (não await para não bloquear)
+			requestNotificationPermission();
+		}
+		// som
+		playNotifySound();
+		// piscar título
+		blinkTitle();
+		// se a janela não estiver visível, tentar trazer atenção (foco) - não funciona em todos os browsers
+		try{ if(document.hidden) window.focus(); }catch(_){ }
+	}catch(e){ console.warn('triggerArrivalNotification failed', e); }
+}
+
 function renderCurrentServingHTML(serving){
 		// não renderizar placeholder vazio; somente retornar HTML quando houver atendimento
 		if(!serving) return '';
@@ -875,7 +1084,7 @@ function renderCurrentServingHTML(serving){
 		  <div class="ticket-actions">\
 		    <div class="ticket">${escapeHtml(ticket)}</div>\
 		    <div class="actions-right">\
-		      <button class="btn-complete" data-sala="${escapeHtml(String(serving.sala || serving.sala || ''))}">Completar Cadastro</button>\
+			  <button class="btn-complete" data-sala="${escapeHtml(String(serving.sala || serving.sala || ''))}">Editar Cadastro</button>\
 		      <button class="btn-close" data-sala="${escapeHtml(String(serving.sala || serving.sala || ''))}">Encerrar Atendimento</button>\
 		    </div>\
 		  </div>\
@@ -1146,10 +1355,47 @@ async function callNextFor(sala){
         return;
     }
 
-    // encontrar primeiro preferencial
-    let index = q.findIndex(x=>x.preferencial);
-    if(index===-1) index = 0; // pega primeiro não preferencial
-    const next = q.splice(index,1)[0];
+	// regra de atendimento: servir até 2 preferenciais seguidos, depois 1 comum (2:1)
+	state.prefServedCount = state.prefServedCount || {};
+	state.prefServedCount[sala] = state.prefServedCount[sala] || 0;
+
+	// separar índices
+	const firstPrefIndex = q.findIndex(x=>x.preferencial);
+	const firstCommonIndex = q.findIndex(x=>!x.preferencial);
+
+	let chosenIndex = -1;
+	// se não há preferenciais, pegar primeiro da fila
+	if(firstPrefIndex === -1){
+		chosenIndex = 0;
+		// reset contador de preferenciais já que não há preferenciais na fila
+		state.prefServedCount[sala] = 0;
+	} else {
+		// existe preferencial
+		if(state.prefServedCount[sala] < 2){
+			// ainda devemos priorizar preferencial
+			chosenIndex = firstPrefIndex;
+			state.prefServedCount[sala] = (state.prefServedCount[sala] || 0) + 1;
+		} else {
+			// já servimos 2 preferenciais seguidos; tentar servir 1 comum
+			if(firstCommonIndex !== -1){
+				chosenIndex = firstCommonIndex;
+				// reset contador após servir um comum
+				state.prefServedCount[sala] = 0;
+			} else {
+				// não há comuns, continuar servindo preferenciais
+				chosenIndex = firstPrefIndex;
+				// manter/incrementar contador (não exceder 2)
+				state.prefServedCount[sala] = Math.min((state.prefServedCount[sala] || 0) + 1, 2);
+			}
+		}
+	}
+
+	// garantir fallback
+	if(chosenIndex === -1) chosenIndex = 0;
+
+	const next = q.splice(chosenIndex,1)[0];
+	// salvar contador atualizado
+	saveState();
     const display = `${next.name} — ${next.ticket}`;
     state.serving[sala] = { ...next, display, calledAt: Date.now() };
     saveState();
@@ -1254,6 +1500,8 @@ if(receptionForm){
 		state.queues = state.queues || {};
 		state.queues[sala] = state.queues[sala] || [];
 
+		// garantir reset diário da numeração de senhas
+		ensureDailyTicketReset();
 		state.lastTicket = (state.lastTicket || 0) + 1;
     	const ticket = formatTicket(state.lastTicket, sala);
     	const entry = { id: state.lastTicket, name, document: documentEl, preferencial, sala, ticket, createdAt: Date.now() };
@@ -1320,31 +1568,31 @@ const receptionRegisterForm = document.getElementById('receptionRegisterForm');
 const regCancelBtn = document.getElementById('reg_cancel');
 
 async function createMunicipe(m){
-	// m: { name, document, preferencial }
+	// m: { name, document, preferencial, endereco?, bairro?, cidade?, telefone? }
 	state.municipes = state.municipes || [];
 	// gerar localId para referencia quando criado offline
 	const localId = 'local-' + Date.now() + '-' + Math.floor(Math.random()*1000);
 	try{
 		if(window.supabase){
 			// tentar inserir na tabela 'municipes' e retornar o registro criado
-			const payload = { nome: m.name, documento: m.document, preferencial: m.preferencial, created_at: formatLocalTimestamp() };
+			const payload = { nome: m.name, documento: m.document, preferencial: !!m.preferencial, endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', created_at: formatLocalTimestamp() };
 			// usar upsert com onConflict para evitar erro de chave única (documento)
 			console.info('[createMunicipe] payload:', payload);
 			const upsertMunQ = window.supabase.from('municipes').upsert([payload], { onConflict: ['documento'] });
 			const { data, error } = await upsertMunQ.select().maybeSingle();
 			if(error){ console.error('[createMunicipe] upsert error', error); throw error; }
 			// armazenar localmente também (fallback/offline)
-			state.municipes.push({ nome: data.nome, documento: data.documento, preferencial: data.preferencial, id: data.id, createdAt: data.created_at });
+			state.municipes.push({ nome: data.nome, documento: data.documento, preferencial: data.preferencial, endereco: data.endereco, bairro: data.bairro, cidade: data.cidade, telefone: data.telefone, id: data.id, createdAt: data.created_at });
 			saveState();
-			return { nome: data.nome, documento: data.documento, id: data.id, preferencial: data.preferencial };
+			return { nome: data.nome, documento: data.documento, id: data.id, preferencial: data.preferencial, endereco: data.endereco, bairro: data.bairro, cidade: data.cidade, telefone: data.telefone };
 		} else {
 			// fallback: gravar localmente
 			const existing = state.municipes.find(x=>x.documento === m.document);
 			if(existing) return existing;
-			const rec = { nome: m.name, documento: m.document, preferencial: m.preferencial, createdAt: formatLocalTimestamp(), localId };
+			const rec = { nome: m.name, documento: m.document, preferencial: !!m.preferencial, endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', createdAt: formatLocalTimestamp(), localId };
 			state.municipes.push(rec);
 			// enfileirar criação remota para quando online
-			enqueueSync({ type: 'createMunicipe', payload: { name: m.name, document: m.document, preferencial: m.preferencial, localId } });
+			enqueueSync({ type: 'createMunicipe', payload: { name: m.name, document: m.document, preferencial: !!m.preferencial, endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', localId } });
 			saveState();
 			return rec;
 		}
@@ -1353,9 +1601,9 @@ async function createMunicipe(m){
 		console.warn('createMunicipe fallback local', e);
 		const existing = state.municipes.find(x=>x.documento === m.document);
 		if(existing) return existing;
-	const rec = { nome: m.name, documento: m.document, preferencial: m.preferencial, createdAt: formatLocalTimestamp(), localId };
+	const rec = { nome: m.name, documento: m.document, preferencial: !!m.preferencial, endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', createdAt: formatLocalTimestamp(), localId };
 		state.municipes.push(rec);
-		enqueueSync({ type: 'createMunicipe', payload: { name: m.name, document: m.document, preferencial: m.preferencial, localId } });
+		enqueueSync({ type: 'createMunicipe', payload: { name: m.name, document: m.document, preferencial: !!m.preferencial, endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', localId } });
 		saveState();
 		return rec;
 	}
@@ -1398,15 +1646,19 @@ if(preCadastroForm){
 		ev.preventDefault();
 		const name = document.getElementById('pre_nome').value.trim();
 		const doc = document.getElementById('pre_documento').value.trim();
+		const rua = (document.getElementById('pre_rua') || {}).value.trim();
+		const bairro = (document.getElementById('pre_bairro') || {}).value.trim();
+		const cidade = (document.getElementById('pre_cidade') || {}).value.trim();
+		const telefone = (document.getElementById('pre_telefone') || {}).value.trim();
 		const pref = document.getElementById('pre_preferencial').checked;
 		if(!name || !doc){ alert('Nome e documento são obrigatórios'); return; }
-		const mun = await createMunicipe({ name, document: doc, preferencial: pref });
+		const mun = await createMunicipe({ name, document: doc, preferencial: pref, endereco: rua, bairro, cidade, telefone });
 		// atualizar selectedInfo para confirmar
 		const selectedInfo = document.getElementById('selectedInfo');
 		if(selectedInfo) selectedInfo.innerHTML = `<strong>${mun.nome}</strong><br><small>${mun.documento}</small>`;
 		// marcar como selecionado para permitir criar atendimento imediatamente
 		selectedMunicipe = mun;
-		alert('Munícipe pré-cadastrado com sucesso. Você pode agora criar o atendimento no painel à esquerda.');
+		alert('Munícipe cadastrado com sucesso. Você pode agora criar o atendimento no painel à esquerda.');
 		preCadastroForm.reset();
 	});
 }
@@ -1461,6 +1713,8 @@ function handleHash(){
 	const h = location.hash.replace('#','');
 	// parar polling de dept anterior sempre que trocamos de tela
 	try{ stopDeptPolling(); }catch(_){ }
+	// parar polling público também para evitar múltiplos timers
+	try{ stopPublicPolling(); }catch(_){ }
 	// checar permissões com base em state.currentUser
 	const current = state.currentUser;
 	const role = current ? current.role : null; // 'adm' or sala number
@@ -1470,10 +1724,10 @@ function handleHash(){
 		showScreen('screen-login');
 		return;
 	}
-	// se o usuário for da recepção, ele só pode acessar a tela de recepção
-	if(role === 'recepcao' && h !== 'reception' && h !== 'login'){
+	// se o usuário for da recepção, ele só pode acessar a tela de recepção (ou relatórios)
+	if(role === 'recepcao' && h !== 'reception' && h !== 'login' && h !== 'relatorios'){
 		// redirecionar silenciosamente para recepção e bloquear acesso
-		alert('Acesso restrito: usuários da Recepção só podem acessar a aba Recepção.');
+		alert('Acesso restrito: usuários da Recepção só podem acessar as abas permitidas (Recepção e Relatórios).');
 		location.hash = 'reception';
 		showScreen('screen-reception');
 		return;
@@ -1516,8 +1770,14 @@ function handleHash(){
 		showScreen('screen-public');
 		currentDept = null;
 		// atualizar filas públicas/remotas ao abrir painel público
-		if(window.supabase && window.navigator.onLine) fetchRemoteAtendimentos().then(()=>{ renderPublicPanel(); }).catch(()=>{ renderPublicPanel(); });
-		else renderPublicPanel();
+		if(window.supabase && window.navigator.onLine){
+			// usar endpoint específico que busca atendimentos com concluido = false
+			fetchRemotePublicPanel().catch(()=>{ renderPublicPanel(); });
+			// iniciar polling agressivo para painel público
+			startPublicPolling(5000);
+		} else {
+			renderPublicPanel();
+		}
 	} else if(h==='departments'){
 		// departments list: apenas adm
 		if(!role || role!=='adm'){
@@ -2484,13 +2744,13 @@ function updateAuthUI(){
 			}
 			// nav visibility rules
 			if(navUsersEl) navUsersEl.classList.toggle('hidden', !isAdmin);
-			// se for recepção, esconder outras entradas de navegação (exceto Recepção link)
+			// se for recepção, esconder outras entradas de navegação (exceto Recepção e Relatórios)
 			if(isRecepcao){
 				try{
 					const top = document.querySelector('.top-nav');
 					if(top){
 						Array.from(top.querySelectorAll('a')).forEach(a=>{
-							if(a.id !== 'navReception') a.classList.add('hidden');
+							if(a.id !== 'navReception' && a.id !== 'navReports') a.classList.add('hidden');
 						});
 					}
 				}catch(_){ }
