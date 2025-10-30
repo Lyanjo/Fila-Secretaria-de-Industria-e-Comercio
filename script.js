@@ -5,27 +5,87 @@
 // - preferencial entra à frente de não preferenciais (mas mantém ordem entre preferenciais)
 // - dados persistidos em localStorage
 
-const NUM_SALAS = 8;
+// lista de departamentos (chaves podem ser números ou códigos - suportamos '60' como Seguro Desemprego)
 const SALAS = {
 	1: 'Sala 1 - Junta Militar',
- 	2: 'Sala 2 - Procon',
- 	3: 'Sala 3 - Ouvidoria',
- 	4: 'Sala 4 - Banco do povo/PAV',
- 	5: 'Sala 5 - Frente de Trabalho',
- 	6: 'Sala 6 - PAT',
- 	7: 'Sala 7 - Preenchimento',
- 	8: 'Sala 8 - SEBRAE'
+	2: 'Sala 2 - Procon',
+	3: 'Sala 3 - Ouvidoria',
+	4: 'Sala 4 - Banco do povo/PAV',
+	5: 'Sala 5 - Frente de Trabalho',
+	6: 'Sala 6 - PAT',
+	60: 'Sala 6 - Seguro Desemprego',
+	7: 'Sala 7 - Preenchimento',
+	8: 'Sala 8 - SEBRAE'
 };
+
+// Retorna a sala visível (ex: '6') para um deptKey (ex: '6' ou '60') baseando-se no rótulo antes do ' - '
+function getVisibleSalaForDept(deptKey){
+	try{
+		const txt = SALAS[String(deptKey)] || (`Sala ${deptKey}`);
+		const short = (txt.indexOf(' - ') !== -1) ? txt.split(' - ')[0].trim() : txt;
+		// tentar extrair o número da sala (ex: 'Sala 6' -> '6')
+		const m = short.match(/(\d+)/);
+		if(m && m[1]){
+			const candidate = String(parseInt(m[1],10));
+			// confirmar que este candidate existe em SALAS (fallback se não existir)
+			if(typeof SALAS[candidate] !== 'undefined') return candidate;
+			return candidate; // mesmo que não exista, retornar número extraído
+		}
+		return String(deptKey);
+	}catch(e){ return String(deptKey); }
+}
 
 function loadState(){
 	const raw = localStorage.getItem('fila_state');
-	if(!raw) return {queues: initQueues(), lastTicket: 0, serving: {}, history: [], users: [], currentUser: null};
+	if(!raw) return {queues: initQueues(), lastTicket: 0, lastTicketBySala: {}, serving: {}, history: [], users: [], currentUser: null};
 	try{ return JSON.parse(raw);}catch(e){return {queues: initQueues(), lastTicket:0, serving:{}, history: [], users: [], currentUser: null}}
+}
+
+// --- Alertas para painel público ---
+function blinkPublicName(deptKey, durationMs = 4000){
+	try{
+		const el = document.querySelector(`.public-serving[data-dept="${escapeHtml(String(deptKey))}"]`);
+		if(!el) return;
+		const originalColor = el.style.color || '';
+		const originalWeight = el.style.fontWeight || '';
+		let elapsed = 0;
+		const interval = 400; // alternância a cada 400ms => 4s = 10 ciclos
+		const iv = setInterval(()=>{
+			try{
+				if(elapsed % 2 === 0){
+					el.style.color = '#000';
+					el.style.fontWeight = '700';
+					el.style.background = 'yellow';
+					el.style.padding = '2px 4px';
+					el.style.borderRadius = '3px';
+				} else {
+					el.style.color = originalColor || '';
+					el.style.fontWeight = originalWeight || '';
+					el.style.background = '';
+					el.style.padding = '';
+					el.style.borderRadius = '';
+				}
+				elapsed++;
+				if(elapsed * interval >= durationMs){ clearInterval(iv); el.style.color = originalColor || ''; el.style.fontWeight = originalWeight || ''; el.style.background = ''; el.style.padding = ''; el.style.borderRadius = ''; }
+			}catch(_){ clearInterval(iv); }
+		}, interval);
+	}catch(e){ /* ignore */ }
+}
+
+function publicArrivalAlert(deptKey, who){
+	try{
+		// som: reutilizar playNotifySound se existir
+		try{ playNotifySound(); setTimeout(()=>{ try{ playNotifySound(); }catch(_){ } }, 200); }catch(_){ }
+		// piscar o texto no painel público
+		blinkPublicName(deptKey, 4000);
+		// opcional: também piscar título da página brevemente
+		try{ blinkTitle(6, 333); }catch(_){ }
+	}catch(e){ console.warn('publicArrivalAlert failed', e); }
 }
 
 function initQueues(){
 	const q = {};
-	for(let i=1;i<=NUM_SALAS;i++) q[i]=[];
+	Object.keys(SALAS).forEach(k=>{ q[String(k)] = []; });
 	return q;
 }
 
@@ -49,9 +109,62 @@ function ensureDailyTicketReset(){
 	if(state.lastTicketDate !== today){
 		// resetar contagem diária
 		state.lastTicket = 0;
+		// reset counters por sala
+		state.lastTicketBySala = {};
 		state.lastTicketDate = today;
 		saveState();
 	}
+}
+
+// obter maior número de ticket remoto para a sala hoje (quando online)
+async function getRemoteMaxTicketForSalaToday(sala){
+	// mapa para sala visível (ex: '6' para dept '6' ou '60')
+	const visible = getVisibleSalaForDept(sala);
+	if(!window.supabase || !window.navigator.onLine) return 0;
+	try{
+		const todayStart = new Date();
+		todayStart.setHours(0,0,0,0);
+		const fromISO = formatLocalTimestamp(todayStart);
+		// buscar registros de hoje e extrair sufixo numérico
+		const { data, error } = await window.supabase.from('atendimentos').select('senha,created_at').gte('created_at', fromISO).order('created_at', { ascending: false }).limit(2000);
+		if(error) { console.warn('getRemoteMaxTicketForSalaToday supabase error', error); return 0; }
+		if(!Array.isArray(data)) return 0;
+		let max = 0;
+		data.forEach(r=>{
+			try{
+				if(!r || !r.senha) return;
+				const parts = String(r.senha).split('-');
+				if(parts.length < 2) return;
+				// parts[0] pode ser 'S06' ou '06' etc. Verificar se pertence à visible
+				const prefix = parts[0].replace(/[^0-9]/g,'');
+				if(String(prefix) !== String(visible)) return; // diferente sala visível
+				const numPart = parts[1].replace(/[^0-9]/g,'');
+				const n = parseInt(numPart,10);
+				if(Number.isFinite(n) && n>max) max = n;
+			}catch(_){ }
+		});
+		return max;
+	}catch(e){ console.warn('getRemoteMaxTicketForSalaToday failed', e); return 0; }
+}
+
+// obter próximo número de ticket para uma sala (garante sequência por sala diária)
+async function getNextTicketNumber(sala){
+	// usar contador por SALA visível (ex: 6) — PAT (6) e Seguro (60) dividem a mesma sequência
+	state.lastTicketBySala = state.lastTicketBySala || {};
+	const visible = getVisibleSalaForDept(sala);
+	// se já temos contador local para hoje na sala visível, incrementar e retornar
+	if(typeof state.lastTicketBySala[visible] === 'number' && state.lastTicketBySala[visible] > 0){
+		state.lastTicketBySala[visible] = state.lastTicketBySala[visible] + 1;
+		saveState();
+		return state.lastTicketBySala[visible];
+	}
+	// caso contrário, tentar buscar remoto o maior número do dia para a sala visível
+	let base = 0;
+	try{ base = await getRemoteMaxTicketForSalaToday(visible); }catch(_){ base = 0; }
+	const next = (base || 0) + 1;
+	state.lastTicketBySala[visible] = next;
+	saveState();
+	return next;
 }
 
 function incrementDailyCount(){
@@ -76,7 +189,7 @@ async function pushAtendimentoToDb(at){
 			// se inseriu com sucesso, atualizar referência local (se existir na fila)
 			try{
 				state.queues = state.queues || {};
-				const salaArr = state.queues[at.sala] || [];
+				const salaArr = state.queues[String(at.sala)] || [];
 				const found = salaArr.find(x=>x.ticket === at.ticket);
 				if(found){
 					found.remoteId = data && data.id;
@@ -136,7 +249,7 @@ function roleToDbDept(role){
     if(role === 'recepcao') return 'Recepção';
     // numeric sala
     if(/^\d+$/.test(String(role))){
-        const r = SALAS[parseInt(role,10)];
+	const r = SALAS[String(role)];
         if(r && r.indexOf(' - ')!==-1) return r.split(' - ')[1];
         return r || String(role);
     }
@@ -318,7 +431,7 @@ async function processSyncQueue(){
 				// mapear item local por ticket e atualizar flags
 				try{
 					state.queues = state.queues || {};
-					const salaArr = state.queues[at.sala] || [];
+					const salaArr = state.queues[String(at.sala)] || [];
 					const found = salaArr.find(x=>x.ticket === at.ticket);
 					if(found){
 						found.remoteId = data && data.id;
@@ -451,11 +564,11 @@ async function fetchRemoteUsers(){
 		try{
 			// coletar documentos únicos retornados
 			const documentos = new Set();
-			for(const s in state.queues){
-				for(const it of (state.queues[s]||[])){
-					if(it.document) documentos.add(String(it.document));
+				for(const s in state.queues){
+					for(const it of (state.queues[String(s)]||[])){
+						if(it.document) documentos.add(String(it.document));
+					}
 				}
-			}
 			const docsArr = Array.from(documentos).filter(Boolean);
 			if(docsArr.length>0 && window.supabase){
 				const { data: munData, error: munErr } = await window.supabase.from('municipes').select('documento,preferencial').in('documento', docsArr).limit(1000);
@@ -464,7 +577,7 @@ async function fetchRemoteUsers(){
 					munData.forEach(m => { if(m && m.documento) prefMap[String(m.documento)] = !!m.preferencial; });
 					// aplicar flags nas filas e ordenar preferenciais primeiro
 					for(const s in state.queues){
-						const arr = state.queues[s] || [];
+						const arr = state.queues[String(s)] || [];
 						arr.forEach(it => { if(it && it.document && prefMap.hasOwnProperty(String(it.document))){ it.preferencial = !!prefMap[String(it.document)]; } });
 						arr.sort((a,b)=>{
 							const pa = a.preferencial ? 0 : 1;
@@ -613,37 +726,30 @@ async function fetchRemoteAtendimentos(departamentoFiltro){
 	// mapear para state.queues por dep_direcionado (campo no banco)
 	// NOTE: este sistema agora mantém filas por sala somente com dados REMOTOS
 	state.queues = {};
-		// coletar ids/tickets retornados para permitir pruning (remoção) de itens que foram concluídos
 		const fetchedBySala = {};
-		rows.forEach(r=>{
-			try{
+		rows.forEach((r, index) => {
+			try {
 				const salaKey = r.dep_direcionado || '';
-				// tentar extrair número da sala (se estiver no formato "Sala X - Nome" ou apenas número)
 				let salaNum = null;
-				if(/^[0-9]+$/.test(String(salaKey))) salaNum = salaKey;
+				if (/^[0-9]+$/.test(String(salaKey))) salaNum = salaKey;
 				else {
-					// procurar correspondência com SALAS
-					for(const k in SALAS){ if(String(SALAS[k]).indexOf(salaKey)!==-1 || SALAS[k].indexOf(salaKey)!==-1) { salaNum = k; break; } }
+					for (const k in SALAS) { if (String(SALAS[k]).indexOf(salaKey) !== -1 || SALAS[k].indexOf(salaKey) !== -1) { salaNum = k; break; } }
 				}
-				// se departamentoFiltro fornecido e não bate, pular
-				if(departamentoFiltro && String(departamentoFiltro) !== String(salaNum)) return;
-				if(!salaNum) return;
+				if (departamentoFiltro && String(departamentoFiltro) !== String(salaNum)) return;
+				if (!salaNum) return;
 				fetchedBySala[salaNum] = fetchedBySala[salaNum] || { ids: new Set(), tickets: new Set() };
-				if(r.id) fetchedBySala[salaNum].ids.add(String(r.id));
-				if(r.senha) fetchedBySala[salaNum].tickets.add(String(r.senha));
-				state.queues[salaNum] = state.queues[salaNum] || [];
-				// apenas registros com concluido == null já foram filtrados na query
-				// evitar duplicata por senha (campo senha)
-				// Sempre re-criar a lista com base no resultado remoto (remoção de dados locais)
-				state.queues[salaNum].push({ name: r.mucipe_nome || r.nome || '', document: r.munic_doc || '', preferencial: false, sala: parseInt(salaNum,10), ticket: r.senha || '', createdAt: r.created_at || r.createdAt, remoteId: r.id, remoteSynced: true });
-			}catch(e){ /* silent */ }
+				if (r.id) fetchedBySala[salaNum].ids.add(String(r.id));
+				if (r.senha) fetchedBySala[salaNum].tickets.add(String(r.senha));
+				state.queues[String(salaNum)] = state.queues[String(salaNum)] || [];
+				state.queues[String(salaNum)].push({ name: r.mucipe_nome || r.nome || '', document: r.munic_doc || '', preferencial: false, sala: String(salaNum), ticket: r.senha || '', createdAt: r.created_at || r.createdAt, remoteId: r.id, remoteSynced: true });
+			} catch (e) { /* silent */ }
 		});
 		// após popular as filas, tentar enriquecer cada item com sinalizador 'preferencial' consultando a tabela municipes
 		try{
 			// coletar documentos presentes nas filas
 			const docs = new Set();
 			for(const s in state.queues){
-				(state.queues[s]||[]).forEach(it=>{ if(it && it.document) docs.add(String(it.document)); });
+				(state.queues[String(s)]||[]).forEach(it=>{ if(it && it.document) docs.add(String(it.document)); });
 			}
 			if(docs.size > 0 && window.supabase){
 				const docArr = Array.from(docs);
@@ -779,15 +885,34 @@ let currentDept = null;
 function renderPublicPanel(){
 	if(!panelGrid) return;
 	panelGrid.innerHTML = '';
-	for(let i=1;i<=NUM_SALAS;i++){
-		const div = document.createElement('div');
-		div.className = 'panel-item';
-		const serving = state.serving[i];
-		// usar o rótulo completo definido em SALAS quando disponível (evita duplicar "Sala X - ...")
-		const label = SALAS[i] || `Sala ${i}`;
-		div.innerHTML = `<strong>${label}</strong><div>${serving ? (serving.display) : '<em>vazio</em>'}</div>`;
-		panelGrid.appendChild(div);
-	}
+	// Agrupar departamentos que compartilham o mesmo rótulo de sala (texto antes do ' - ')
+	const groups = {}; // label -> [deptKeys]
+	Object.keys(SALAS).forEach(k=>{
+		const txt = SALAS[k] || (`Sala ${k}`);
+		const short = (txt.indexOf(' - ') !== -1) ? txt.split(' - ')[0].trim() : txt;
+		groups[short] = groups[short] || [];
+		groups[short].push(String(k));
+	});
+
+	// Render cada grupo como um card compacto (mantendo visual similar ao original)
+	Object.keys(groups).forEach(label => {
+		const keys = groups[label];
+		const card = document.createElement('div');
+		card.className = 'panel-item';
+		// header + compact body
+		const headerHtml = `<strong>${escapeHtml(label)}</strong>`;
+		// construir linhas internas pequenas por departamento (ex: "PAT: Nome — S06-001" ou "PAT: vazio")
+		const lines = keys.map(deptKey => {
+			const serving = state.serving && state.serving[String(deptKey)] ? state.serving[String(deptKey)] : null;
+			const deptNameFull = SALAS[deptKey] || (`Sala ${deptKey}`);
+			const deptLabel = (deptNameFull.indexOf(' - ') !== -1) ? deptNameFull.split(' - ')[1] : deptNameFull;
+			// incluir span com data-dept para permitir destaque visual posterior
+			const content = serving ? `<span class="public-serving" data-dept="${escapeHtml(String(deptKey))}">${escapeHtml(serving.display)}</span>` : `<span class="public-serving" data-dept="${escapeHtml(String(deptKey))}"><em style=\"color:#6b7280\">vazio</em></span>`;
+			return `<div style="font-size:0.95rem;margin-top:4px">${escapeHtml(deptLabel)}: ${content}</div>`;
+		}).join('');
+		card.innerHTML = headerHtml + `<div style="margin-top:6px">${lines}</div>`;
+		panelGrid.appendChild(card);
+	});
 }
 
 // fetch para popular o painel público: procurar atendimentos com concluido = false e mapear por dep_direcionado
@@ -798,10 +923,12 @@ async function fetchRemotePublicPanel(){
 		const { data, error } = await q;
 		if(error){ console.warn('fetchRemotePublicPanel error', error); return; }
 		const rows = Array.isArray(data) ? data : [];
-		// resetar serving temporariamente
-		state.serving = state.serving || {};
-		// preencher com nulls para evitar mostrar undefined
-		for(let i=1;i<=NUM_SALAS;i++) state.serving[i] = state.serving[i] || null;
+	// resetar serving temporariamente
+	state.serving = state.serving || {};
+	// preencher com nulls para evitar mostrar undefined para cada departamento definido em SALAS
+	Object.keys(SALAS).forEach(k => { state.serving[String(k)] = state.serving[String(k)] || null; });
+		// Mapeamento por departamento (mantemos a chave do departamento exata, ex: '6' ou '60')
+		const byDept = {};
 		rows.forEach(r=>{
 			try{
 				const salaKey = r.dep_direcionado || '';
@@ -809,13 +936,37 @@ async function fetchRemotePublicPanel(){
 				if(/^[0-9]+$/.test(String(salaKey))) salaNum = String(salaKey);
 				else { for(const k in SALAS){ if(String(SALAS[k]).indexOf(salaKey)!==-1 || SALAS[k].indexOf(salaKey)!==-1) { salaNum = String(k); break; } } }
 				if(!salaNum) return;
-				// criar display: nome — senha
 				const name = r.mucipe_nome || r.nome || '';
 				const ticket = r.senha || '';
 				const display = `${name} — ${ticket}`;
-				state.serving[parseInt(salaNum,10)] = { name, ticket, display, remoteId: r.id, inicio_atendimento: r.inicio_atendimento || null };
+				byDept[String(salaNum)] = { name, ticket, display, remoteId: r.id, inicio_atendimento: r.inicio_atendimento || null };
 			}catch(e){ /* ignore */ }
 		});
+
+		// detectar mudanças por departamento: se antes estava vazio e agora tem atendimento ou se mudou o ticket/name
+		const alerts = [];
+		Object.keys(SALAS).forEach(k => {
+			const deptKey = String(k);
+			const prev = state.serving && state.serving[deptKey] ? state.serving[deptKey] : null;
+			const next = byDept[deptKey] || null;
+			// atualizar estado
+			state.serving[deptKey] = next;
+			// disparar alerta somente quando houve transição vazio->ocupado ou mudança de pessoa (nome/ticket)
+			if(next){
+				if(!prev) alerts.push({ dept: deptKey, who: next.display });
+				else if(String(prev.display) !== String(next.display)) alerts.push({ dept: deptKey, who: next.display });
+			}
+			// se passou de cheio para vazio => NÃO alertar (exceção)
+		});
+		// se houver alertas, disparar sequência (evitar duplicatas em massa)
+		if(alerts.length>0){
+			// tocar som e destacar cada um sequencialmente
+			(async ()=>{
+				for(const a of alerts){
+					try{ publicArrivalAlert(a.dept, a.who); await new Promise(r=>setTimeout(r, 350)); }catch(_){ }
+				}
+			})();
+		}
 		saveState();
 		renderPublicPanel();
 	}catch(e){ console.warn('fetchRemotePublicPanel exception', e); }
@@ -836,7 +987,7 @@ function renderQueueForDept(sala){
 	// inicializar estrutura auxiliar para detectar transições de tamanho
 	state._lastRenderedQueueSize = state._lastRenderedQueueSize || {};
 	// usar apenas dados remotos para o painel do departamento
-	const arr = (state.queues && state.queues[sala]) ? (state.queues[sala].slice()) : [];
+	const arr = (state.queues && state.queues[String(sala)]) ? (state.queues[String(sala)].slice()) : [];
 	// badge indicando origem dos itens: Remoto / Local / Remoto + Local
 	const hasRemote = Array.isArray(arr) && arr.length>0; // todos são remotos
 	const hasLocal = false;
@@ -874,13 +1025,13 @@ function renderQueueForDept(sala){
 	if(arr.length===0){ 
 		deptQueueList.innerHTML = '<p>Nenhuma pessoa na fila.</p>'; 
 		// salvar tamanho atual
-		state._lastRenderedQueueSize[sala] = 0;
+		state._lastRenderedQueueSize[String(sala)] = 0;
 		saveState();
 		return; 
 	}
 
 	// detectar transição: vazio -> chegou alguém
-	const prevSize = state._lastRenderedQueueSize[sala] || 0;
+	const prevSize = state._lastRenderedQueueSize[String(sala)] || 0;
 	const newSize = arr.length;
 	if(prevSize === 0 && newSize > 0){
 		// somente notificar se o usuário está visualizando esta sala
@@ -889,7 +1040,7 @@ function renderQueueForDept(sala){
 		}
 	}
 	// atualizar tamanho armazenado
-	state._lastRenderedQueueSize[sala] = newSize;
+	state._lastRenderedQueueSize[String(sala)] = newSize;
 	saveState();
 	arr.forEach((item,idx)=>{
 	const div = document.createElement('div');
@@ -915,7 +1066,7 @@ async function fetchRemoteServing(departamentoFiltro){
 		const rows = Array.isArray(data) ? data : [];
 		if(rows.length === 0){
 			// limpar serving local para a sala
-			if(state.serving && state.serving[departamentoFiltro]){ state.serving[departamentoFiltro] = null; saveState(); }
+			if(state.serving && state.serving[String(departamentoFiltro)]){ state.serving[String(departamentoFiltro)] = null; saveState(); }
 			return null;
 		}
 		const rec = rows[0];
@@ -927,16 +1078,16 @@ async function fetchRemoteServing(departamentoFiltro){
 		if(!salaNum) return null;
 		state.serving = state.serving || {};
 		// merge: preservar campos locais (endereco, bairro, cidade, telefone) quando presentes
-		const existing = state.serving[salaNum] || {};
+	const existing = state.serving[String(salaNum)] || {};
 		existing.name = rec.mucipe_nome || rec.nome || existing.name || '';
 		existing.document = rec.munic_doc || existing.document || '';
-		existing.sala = parseInt(salaNum,10);
+		existing.sala = String(salaNum);
 		existing.ticket = rec.senha || existing.ticket || '';
 		existing.remoteId = rec.id || existing.remoteId;
 		existing.remoteSynced = true;
 		existing.inicio_atendimento = rec.inicio_atendimento || existing.inicio_atendimento || null;
 		// salvar preliminarmente e tentar enriquecer com dados da tabela municipes
-		state.serving[salaNum] = existing;
+	state.serving[String(salaNum)] = existing;
 		saveState();
 		// tentar buscar dados do munícipe pelo documento para preencher endereco/bairro/telefone
 		try{
@@ -953,7 +1104,7 @@ async function fetchRemoteServing(departamentoFiltro){
 				}
 			}
 		}catch(_){ /* ignore */ }
-		return state.serving[salaNum];
+		return state.serving[String(salaNum)];
 	}catch(e){ console.warn('fetchRemoteServing exception', e); return null; }
 }
 
@@ -1177,7 +1328,7 @@ function renderDeptCurrentServing(sala){
 				// remove existing current-serving if presente
 				const existing = document.querySelector('.current-serving.dept-panel');
 				if(existing) existing.remove();
-				const serving = state.serving && state.serving[sala] ? state.serving[sala] : null;
+				const serving = state.serving && state.serving[String(sala)] ? state.serving[String(sala)] : null;
 				const html = renderCurrentServingHTML(serving);
 				// inserir logo após o título
 			titleEl.insertAdjacentHTML('afterend', html); 
@@ -1208,7 +1359,7 @@ function onCompleteClick(e){
 	if(!card) return;
 	// identificar sala e munícipe
 	const sala = currentDept;
-	const serving = sala && state.serving && state.serving[sala] ? state.serving[sala] : null;
+	const serving = sala && state.serving && state.serving[String(sala)] ? state.serving[String(sala)] : null;
 	if(!serving) return;
 	// criar container de edição se não existir
 	let editBox = card.querySelector('.complete-edit-box');
@@ -1264,7 +1415,7 @@ function onCompleteClick(e){
 			// atualizar serving também
 			serving.endereco = endereco; serving.bairro = bairro; serving.cidade = cidade; serving.telefone = telefone;
 			state.serving = state.serving || {};
-			state.serving[sala] = serving;
+			state.serving[String(sala)] = serving;
 			saveState();
 			// tentar enviar ao Supabase (upsert na tabela municipes)
 			try{
@@ -1346,11 +1497,11 @@ async function onCloseClick(e){
 		// procurar último hist com mesmo ticket e sala
 		let histIdx = -1;
 		for(let i=state.history.length-1;i>=0;i--){
-			if(state.history[i].ticket === serving.ticket && state.history[i].sala === parseInt(sala,10)) { histIdx = i; break; }
+			if(state.history[i].ticket === serving.ticket && String(state.history[i].sala) === String(sala)) { histIdx = i; break; }
 		}
 		if(histIdx !== -1){ state.history[histIdx].endedAt = endedAt; }
 		else {
-			state.history.push({ name: serving.name, document: serving.document || serving.documento, sala: parseInt(sala,10), departamento: SALAS[sala], ticket: serving.ticket, datetime: formatLocalTimestamp(), endedAt });
+			state.history.push({ name: serving.name, document: serving.document || serving.documento, sala: String(sala), departamento: SALAS[sala], ticket: serving.ticket, datetime: formatLocalTimestamp(), endedAt });
 		}
 		saveState();
 		// tentar atualizar atendimento remoto (se já tiver remoteId)
@@ -1378,7 +1529,7 @@ async function onCloseClick(e){
 
 function enableDeptControlsFor(sala){
     deptCallNext.disabled = !sala;
-    deptRecall.disabled = !sala || !state.serving[sala];
+	deptRecall.disabled = !sala || !state.serving || !state.serving[String(sala)];
 }
 
 // Chamar próximo: preferenciais primeiro (FIFO entre preferenciais), depois não preferenciais FIFO
@@ -1386,16 +1537,16 @@ async function callNextFor(sala){
     if(!sala) return;
 	// se já existe um atendimento em andamento nesta sala, concluí-lo primeiro
 	try{
-		const current = state.serving && state.serving[sala] ? state.serving[sala] : null;
+		const current = state.serving && state.serving[String(sala)] ? state.serving[String(sala)] : null;
 		if(current){
 			// marcar histórico de encerramento
 			const endedAt = formatLocalTimestamp();
 			state.history = state.history || [];
 			// tentar atualizar registro existente no histórico (último com mesmo ticket/sala)
 			let histIdx = -1;
-			for(let i=state.history.length-1;i>=0;i--){ if(state.history[i].ticket === current.ticket && state.history[i].sala === parseInt(sala,10)) { histIdx = i; break; } }
+			for(let i=state.history.length-1;i>=0;i--){ if(state.history[i].ticket === current.ticket && String(state.history[i].sala) === String(sala)) { histIdx = i; break; } }
 			if(histIdx !== -1){ state.history[histIdx].endedAt = endedAt; }
-			else { state.history.push({ name: current.name, document: current.document || current.documento, sala: parseInt(sala,10), departamento: SALAS[sala], ticket: current.ticket, datetime: formatLocalTimestamp(current.calledAt || Date.now()), endedAt }); }
+			else { state.history.push({ name: current.name, document: current.document || current.documento, sala: String(sala), departamento: SALAS[sala], ticket: current.ticket, datetime: formatLocalTimestamp(current.calledAt || Date.now()), endedAt }); }
 			// tentar atualizar remoto imediatamente
 			if(window.supabase && window.navigator.onLine){
 				try{
@@ -1417,15 +1568,16 @@ async function callNextFor(sala){
 			}
 			// limpar atendimento local após conclusão
 			state.serving = state.serving || {};
-			state.serving[sala] = null;
+			state.serving[String(sala)] = null;
 			saveState();
 			renderPublicPanel();
 			renderQueueForDept(sala);
 		}
 	}catch(err){ console.warn('Erro ao concluir atendimento atual antes de chamar próximo', err); }
-    const q = state.queues[sala];
-    if(!q || q.length===0){
-        state.serving[sala] = null;
+	const q = state.queues && state.queues[String(sala)] ? state.queues[String(sala)] : [];
+	if(!q || q.length===0){
+		state.serving = state.serving || {};
+		state.serving[String(sala)] = null;
         saveState();
         renderPublicPanel();
         renderQueueForDept(sala);
@@ -1436,7 +1588,7 @@ async function callNextFor(sala){
 
 	// regra de atendimento: servir até 2 preferenciais seguidos, depois 1 comum (2:1)
 	state.prefServedCount = state.prefServedCount || {};
-	state.prefServedCount[sala] = state.prefServedCount[sala] || 0;
+	state.prefServedCount[String(sala)] = state.prefServedCount[String(sala)] || 0;
 
 	// separar índices
 	const firstPrefIndex = q.findIndex(x=>x.preferencial);
@@ -1447,24 +1599,24 @@ async function callNextFor(sala){
 	if(firstPrefIndex === -1){
 		chosenIndex = 0;
 		// reset contador de preferenciais já que não há preferenciais na fila
-		state.prefServedCount[sala] = 0;
+		state.prefServedCount[String(sala)] = 0;
 	} else {
 		// existe preferencial
-		if(state.prefServedCount[sala] < 2){
+		if(state.prefServedCount[String(sala)] < 2){
 			// ainda devemos priorizar preferencial
 			chosenIndex = firstPrefIndex;
-			state.prefServedCount[sala] = (state.prefServedCount[sala] || 0) + 1;
+			state.prefServedCount[String(sala)] = (state.prefServedCount[String(sala)] || 0) + 1;
 		} else {
 			// já servimos 2 preferenciais seguidos; tentar servir 1 comum
 			if(firstCommonIndex !== -1){
 				chosenIndex = firstCommonIndex;
 				// reset contador após servir um comum
-				state.prefServedCount[sala] = 0;
+				state.prefServedCount[String(sala)] = 0;
 			} else {
 				// não há comuns, continuar servindo preferenciais
 				chosenIndex = firstPrefIndex;
 				// manter/incrementar contador (não exceder 2)
-				state.prefServedCount[sala] = Math.min((state.prefServedCount[sala] || 0) + 1, 2);
+				state.prefServedCount[String(sala)] = Math.min((state.prefServedCount[String(sala)] || 0) + 1, 2);
 			}
 		}
 	}
@@ -1476,18 +1628,19 @@ async function callNextFor(sala){
 	// salvar contador atualizado
 	saveState();
     const display = `${next.name} — ${next.ticket}`;
-    state.serving[sala] = { ...next, display, calledAt: Date.now() };
+	state.serving = state.serving || {};
+	state.serving[String(sala)] = { ...next, display, calledAt: Date.now() };
     saveState();
     renderPublicPanel();
     renderQueueForDept(sala);
     enableDeptControlsFor(sala);
 
 	// registrar histórico: quando chamado para atendimento consideramos que entrou em atendimento
-    const hist = {
+	const hist = {
 		name: next.name,
 		document: next.document,
-		departamento: SALAS[sala],
-		sala: parseInt(sala,10),
+		departamento: SALAS[String(sala)],
+		sala: String(sala),
 		datetime: formatLocalTimestamp(),
 		ticket: next.ticket
 	};
@@ -1495,17 +1648,17 @@ async function callNextFor(sala){
 	state.history.push(hist);
 	saveState();
 	// atualizar cartão do departamento se estivermos na tela desta sala
-	if(currentDept && parseInt(currentDept,10) === parseInt(sala,10)) renderDeptCurrentServing(sala);
+	if(currentDept && String(currentDept) === String(sala)) renderDeptCurrentServing(sala);
 
 	// registrar inicio_atendimento imediato no Supabase quando possível
 	try{
-		const at = state.serving[sala];
+		const at = state.serving && state.serving[String(sala)] ? state.serving[String(sala)] : null;
 		const inicioTs = formatLocalTimestamp();
 		// atualizar localmente o objeto com inicio
-		at.inicio_atendimento = inicioTs;
+		if(at) at.inicio_atendimento = inicioTs;
 		saveState();
 		// se existir remoteId, atualizar apenas o registro remoto
-				if(at.remoteId && window.supabase && window.navigator.onLine){
+				if(at && at.remoteId && window.supabase && window.navigator.onLine){
 			try{
 				// marcar inicio e definir concluido = false para representar atendimento ativo
 				const { error } = await window.supabase.from('atendimentos').update({ inicio_atendimento: inicioTs, concluido: false }).eq('id', at.remoteId);
@@ -1515,15 +1668,14 @@ async function callNextFor(sala){
 				// sem remoteId: tentar inserir um registro remoto com inicio_atendimento
 			if(window.supabase && window.navigator.onLine){
 				try{
-					const payload = { mucipe_nome: at.name, munic_doc: at.document, dep_direcionado: at.sala.toString(), senha: at.ticket, created_at: formatLocalTimestamp(at.createdAt), inicio_atendimento: inicioTs, concluido: false };
-					const { data, error } = await window.supabase.from('atendimentos').insert([payload]).select().maybeSingle();
+						const payload = { mucipe_nome: at.name, munic_doc: at.document, dep_direcionado: String(at.sala || sala), senha: at.ticket, created_at: formatLocalTimestamp(at.createdAt), inicio_atendimento: inicioTs, concluido: false };
+						const { data, error } = await window.supabase.from('atendimentos').insert([payload]).select().maybeSingle();
 					if(error){ console.warn('insert inicio_atendimento failed', error); // enfileirar para retry
 						// enfileira payload com inicio_atendimento para criar posteriormente
 						enqueueSync({ type: 'createAtendimento', payload: { ...at, inicio_atendimento: inicioTs } });
 					} else {
 						// atualizar referência local
-						at.remoteId = data && data.id;
-						at.remoteSynced = true;
+						if(at){ at.remoteId = data && data.id; at.remoteSynced = true; }
 						saveState();
 					}
 				}catch(e){ console.warn('insert inicio_atendimento exception', e); enqueueSync({ type: 'createAtendimento', payload: { ...at, inicio_atendimento: inicioTs } }); }
@@ -1545,7 +1697,7 @@ function recallFor(sala){
     renderPublicPanel();
     alert(`Chamando novamente: ${serving.display}`);
 	// atualizar cartão do departamento se estivermos na tela desta sala
-	if(currentDept && parseInt(currentDept,10) === parseInt(sala,10)) renderDeptCurrentServing(sala);
+	if(currentDept && String(currentDept) === String(sala)) renderDeptCurrentServing(sala);
 }
 
 // Recepção: cria ticket e adiciona à fila
@@ -1575,54 +1727,64 @@ if(receptionForm){
     	const sala = (document.getElementById('sala') || {}).value;
     	if(!name || !documentEl || !sala){ alert('Preencha todos os campos.'); return; }
 
-		// garantir estrutura de filas em memória para a sala (evita push em undefined)
-		state.queues = state.queues || {};
-		state.queues[sala] = state.queues[sala] || [];
+	// garantir estrutura de filas em memória para a sala (evita push em undefined)
+	state.queues = state.queues || {};
+	state.queues[String(sala)] = state.queues[String(sala)] || [];
 
-		// garantir reset diário da numeração de senhas
-		ensureDailyTicketReset();
-		state.lastTicket = (state.lastTicket || 0) + 1;
-    	const ticket = formatTicket(state.lastTicket, sala);
-    	const entry = { id: state.lastTicket, name, document: documentEl, preferencial, sala, ticket, createdAt: Date.now() };
+	// garantir reset diário da numeração de senhas (por sala)
+	ensureDailyTicketReset();
+	// obter próximo número de ticket para a SALA VISÍVEL (PAT e Seguro compartilham sequência)
+	let perSalaNumber = 1;
+	const visibleSala = getVisibleSalaForDept(sala);
+	try{ perSalaNumber = await getNextTicketNumber(sala); }catch(e){ perSalaNumber = (state.lastTicketBySala && state.lastTicketBySala[visibleSala]) ? state.lastTicketBySala[visibleSala] : 1; }
+	const ticket = formatTicket(perSalaNumber, visibleSala);
+		const entry = { id: perSalaNumber, name, document: documentEl, preferencial, sala, ticket, createdAt: Date.now() };
 
 		// inserir: manipular uma cópia local da fila e só depois reatribuir para evitar condições de corrida com polling
-		let q = state.queues[sala] || [];
+	let q = state.queues[String(sala)] || [];
 		if(preferencial){
 			let idx = q.findIndex(x=>!x.preferencial);
 			if(idx===-1) q.push(entry); else q.splice(idx,0,entry);
 		} else {
 			q.push(entry);
 		}
-		// garantir reatribuição ao estado (caso polling tenha reiniciado state.queues)
-		state.queues[sala] = q;
+	// garantir reatribuição ao estado (caso polling tenha reiniciado state.queues)
+	state.queues[String(sala)] = q;
 
     				saveState();
     					saveState();
-    					ticketIssuedEl.textContent = `Registro realizado. Dirija-se à sala ${sala}. Senha: ${ticket}`;
+						ticketIssuedEl.textContent = `Registro realizado. Dirija-se à sala ${visibleSala}. Senha: ${ticket}`;
     						// incrementar contador diário (pessoa passou pela recepção)
     						incrementDailyCount();
-    						// tentar enviar ao Supabase (opcional). Se falhar, enfileirar para sincronizar depois
-    						try{
-    							if(window.supabase && window.navigator.onLine){
-    								const res = await pushAtendimentoToDb(entry);
-    								if(!res || !res.success){
-    									// push falhou, enfileirar
-    									entry.remoteSynced = false;
-    									enqueueSync({ type: 'createAtendimento', payload: entry });
-    								} else {
-    									entry.remoteSynced = true;
-    									entry.remoteId = res.data && res.data.id;
-    								}
-    							} else {
-    								// enfileira para sincronização
-    								entry.remoteSynced = false;
-    								enqueueSync({ type: 'createAtendimento', payload: entry });
-    							}
-    						}catch(e){
-    							console.warn('pushAtendimento failed, enqueueing', e);
-    							entry.remoteSynced = false;
-    							enqueueSync({ type: 'createAtendimento', payload: entry });
-    						}
+				    		// Sistema exige estar online para criar atendimentos; não geramos tickets localmente
+				    		if(!(window.supabase && window.navigator.onLine)){
+				    			alert('Operação disponível somente quando o sistema estiver online. Conecte-se à internet e tente novamente.');
+				    			return;
+				    		}
+				    		// tentar criar atendimento diretamente no Supabase com a senha gerada localmente a partir do contador remoto
+				    		try{
+				    			// garantir que o next ticket por sala esteja alinhado com o remoto
+								const perSalaNumber = state.lastTicketBySala && state.lastTicketBySala[visibleSala] ? state.lastTicketBySala[visibleSala] : await getNextTicketNumber(sala);
+								const remoteTicket = formatTicket(perSalaNumber, visibleSala);
+								// enviar dep_direcionado como o departamento real selecionado (ex: '60')
+								const payload = { mucipe_nome: entry.name, munic_doc: entry.document, dep_direcionado: String(entry.sala), senha: remoteTicket, created_at: formatLocalTimestamp(entry.createdAt) };
+				    			const { data, error } = await window.supabase.from('atendimentos').insert([payload]).select().maybeSingle();
+				    			if(error){
+				    				console.warn('create atendimento supabase error', error);
+				    				alert('Falha ao criar atendimento no servidor. Tente novamente.');
+				    				return;
+				    			}
+				    			// atualizar entry com dados retornados
+				    			entry.remoteSynced = true;
+				    			entry.remoteId = data && data.id;
+				    			entry.ticket = data && data.senha ? data.senha : remoteTicket;
+				    			// confirmar que o contador local por sala foi incrementado (getNextTicketNumber já fez isso)
+				    			saveState();
+				    		}catch(e){
+				    			console.warn('Erro ao inserir atendimento remoto', e);
+				    			alert('Erro ao criar atendimento no servidor.');
+				    			return;
+				    		}
 						// atualizar contador remoto/local imediatamente
 						try{ if(window.supabase && window.navigator.onLine) fetchRemoteTodayCount(); }catch(_){ }
     			receptionForm.reset();
@@ -1637,7 +1799,7 @@ if(receptionForm){
     			if(inlineRegContainer) inlineRegContainer.classList.add('hidden');
     			if(searchResultsEl) searchResultsEl.innerHTML = '';
     			renderPublicPanel();
-    			if(currentDept && parseInt(currentDept,10) === parseInt(sala,10)) renderQueueForDept(sala);
+				if(currentDept && String(currentDept) === String(sala)) renderQueueForDept(sala);
     });
 }
 
@@ -1911,7 +2073,7 @@ handleHash();
 // Inicialização
 function ensureQueues(){
 	// Garante que todas as salas existem no estado (útil quando migrando)
-	for(let i=1;i<=NUM_SALAS;i++) if(!state.queues[i]) state.queues[i]=[];
+	Object.keys(SALAS).forEach(k => { if(!state.queues[String(k)]) state.queues[String(k)] = []; });
 }
 
 // Inicialização
@@ -1953,15 +2115,15 @@ function setupRealtimeSync(){
 			}
 
 			// helper para procurar e remover por remoteId ou senha
-			const removeFromQueuesById = (id)=>{
+				const removeFromQueuesById = (id)=>{
 				if(!id) return false;
 				let removed = false;
 				state.queues = state.queues || {};
-				for(const s in state.queues){
-					const arr = state.queues[s] || [];
-					const idx = arr.findIndex(x => x.remoteId === id || String(x.ticket) === String(rec.senha));
-					if(idx !== -1){ arr.splice(idx,1); removed = true; }
-				}
+					for(const s in state.queues){
+						const arr = state.queues[String(s)] || [];
+						const idx = arr.findIndex(x => x.remoteId === id || String(x.ticket) === String(rec.senha));
+						if(idx !== -1){ arr.splice(idx,1); removed = true; }
+					}
 				return removed;
 			};
 
@@ -1974,7 +2136,7 @@ function setupRealtimeSync(){
 				if(typeof rec.concluido === 'undefined' || rec.concluido === null){
 					const exists = state.queues[salaNum].some(x => x.remoteId === rec.id || x.ticket === (rec.senha || ''));
 					if(!exists){
-						state.queues[salaNum].push({ name: rec.mucipe_nome || rec.nome || '', document: rec.munic_doc || '', preferencial: false, sala: parseInt(salaNum,10), ticket: rec.senha || '', createdAt: rec.created_at || rec.createdAt, remoteId: rec.id, remoteSynced: true });
+						state.queues[String(salaNum)].push({ name: rec.mucipe_nome || rec.nome || '', document: rec.munic_doc || '', preferencial: false, sala: String(salaNum), ticket: rec.senha || '', createdAt: rec.created_at || rec.createdAt, remoteId: rec.id, remoteSynced: true });
 						saveState();
 						try{ if(currentDept && String(currentDept) === String(salaNum)) renderQueueForDept(salaNum); }catch(_){ }
 						renderPublicPanel();
@@ -1982,14 +2144,14 @@ function setupRealtimeSync(){
 				} else if(rec.concluido === false){
 					// registro passou a atendimento ativo: colocar em state.serving
 					state.serving = state.serving || {};
-					state.serving[salaNum] = { name: rec.mucipe_nome || rec.nome || '', document: rec.munic_doc || '', sala: parseInt(salaNum,10), ticket: rec.senha || '', remoteId: rec.id, remoteSynced: true, inicio_atendimento: rec.inicio_atendimento || null };
+					state.serving[String(salaNum)] = { name: rec.mucipe_nome || rec.nome || '', document: rec.munic_doc || '', sala: String(salaNum), ticket: rec.senha || '', remoteId: rec.id, remoteSynced: true, inicio_atendimento: rec.inicio_atendimento || null };
 					saveState();
 					renderPublicPanel();
 					if(currentDept && String(currentDept) === String(salaNum)) renderDeptCurrentServing(salaNum);
 				} else if(rec.concluido === true){
 					// concluído: remover de filas e serving
 					const removed = removeFromQueuesById(rec.id);
-					if(state.serving && state.serving[salaNum] && state.serving[salaNum].remoteId === rec.id) state.serving[salaNum] = null;
+					if(state.serving && state.serving[String(salaNum)] && state.serving[String(salaNum)].remoteId === rec.id) state.serving[String(salaNum)] = null;
 					saveState();
 					renderPublicPanel();
 					if(currentDept) renderQueueForDept(currentDept);
@@ -2008,7 +2170,7 @@ function setupRealtimeSync(){
 							const sv = state.serving[s];
 							if(sv && (sv.remoteId === rec.id || sv.ticket === (rec.senha || ''))){
 								state.history = state.history || [];
-								state.history.push({ name: sv.name, document: sv.document || sv.documento, sala: parseInt(s,10), departamento: SALAS[s], ticket: sv.ticket, datetime: sv.calledAt ? formatLocalTimestamp(sv.calledAt) : formatLocalTimestamp(), endedAt: formatLocalTimestamp() });
+								state.history.push({ name: sv.name, document: sv.document || sv.documento, sala: String(s), departamento: SALAS[s], ticket: sv.ticket, datetime: sv.calledAt ? formatLocalTimestamp(sv.calledAt) : formatLocalTimestamp(), endedAt: formatLocalTimestamp() });
 								state.serving[s] = null;
 							}
 						}
@@ -2023,7 +2185,7 @@ function setupRealtimeSync(){
 					// remover da fila local (se presente) e colocar em serving
 					removeFromQueuesById(rec.id);
 					state.serving = state.serving || {};
-					state.serving[salaNum] = { name: rec.mucipe_nome || rec.nome || '', document: rec.munic_doc || '', sala: parseInt(salaNum,10), ticket: rec.senha || '', remoteId: rec.id, remoteSynced: true, inicio_atendimento: rec.inicio_atendimento || null };
+					state.serving[String(salaNum)] = { name: rec.mucipe_nome || rec.nome || '', document: rec.munic_doc || '', sala: String(salaNum), ticket: rec.senha || '', remoteId: rec.id, remoteSynced: true, inicio_atendimento: rec.inicio_atendimento || null };
 					saveState();
 					renderPublicPanel();
 					if(currentDept && String(currentDept) === String(salaNum)) renderDeptCurrentServing(salaNum);
@@ -2904,10 +3066,10 @@ function clearAllPanels(){
 		return;
 	}
 	if(!confirm('Confirma limpar todos os painéis e encerrar atendimentos abertos? Essa ação limpará filas e atendimentos em todas as salas.')) return;
-	for(let i=1;i<=NUM_SALAS;i++){
-		if(state.serving) state.serving[i]=null;
-		if(state.queues) state.queues[i]=[];
-	}
+	Object.keys(SALAS).forEach(k => {
+		if(state.serving) state.serving[String(k)] = null;
+		if(state.queues) state.queues[String(k)] = [];
+	});
 	saveState();
 	renderPublicPanel();
 	handleHash();

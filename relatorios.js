@@ -5,9 +5,10 @@ const SALAS = {
  	3: 'Sala 3 - Ouvidoria',
  	4: 'Sala 4 - Banco do povo/PAV',
  	5: 'Sala 5 - Frente de Trabalho',
- 	6: 'Sala 6 - PAT',
- 	7: 'Sala 7 - Preenchimento',
- 	8: 'Sala 8 - SEBRAE'
+	6: 'Sala 6 - PAT',
+	60: 'Sala 6 - Seguro Desemprego',
+	7: 'Sala 7 - Preenchimento',
+	8: 'Sala 8 - SEBRAE'
 };
 
 function loadState(){
@@ -25,6 +26,7 @@ const reportTo = document.getElementById('reportTo');
 const applyFilterBtn = document.getElementById('applyFilter');
 const clearFilterBtn = document.getElementById('clearFilter');
 const exportCsvBtn = document.getElementById('exportCsv');
+const reportsTotalEl = document.getElementById('reportsTotal');
 // sort state
 let sortField = 'datetime'; // default sort by date (newest first)
 let sortDir = 'desc'; // 'asc' or 'desc'
@@ -38,7 +40,7 @@ function filterHistory(){
 	const to = reportTo && reportTo.value ? new Date(reportTo.value) : null;
 	return hist.filter(r=>{
 		if(dept && dept!=='all'){
-			if(!r.sala || parseInt(r.sala,10) !== parseInt(dept,10)) return false;
+			if(!r.sala || String(r.sala) !== String(dept)) return false;
 		}
 		if(from){
 			const d = new Date(r.datetime);
@@ -182,6 +184,7 @@ async function getReportRows(){
 }
 
 // Versão assíncrona para renderizar tabela usando getReportRows
+
 async function renderReportsTableAsync(){
 	reportsTableBody.innerHTML = '';
 	const rows = await getReportRows();
@@ -189,9 +192,18 @@ async function renderReportsTableAsync(){
 		reportsTableBody.innerHTML = '<tr><td colspan="9">Dados remotos indisponíveis. Verifique a conexão e a configuração do Supabase. <button id="retryRemote">Tentar novamente</button></td></tr>';
 		const btn = document.getElementById('retryRemote');
 		if(btn) btn.addEventListener('click', async ()=>{ btn.disabled = true; btn.textContent = 'Tentando...'; await renderReportsTableAsync(); });
+		// atualizar contador para 0 quando remoto indisponível
+		if(reportsTotalEl) reportsTotalEl.textContent = 'Total de atendimentos: 0';
 		return;
 	}
-	if(!rows || rows.length===0){ reportsTableBody.innerHTML = '<tr><td colspan="10">Nenhum atendimento registrado para os filtros selecionados.</td></tr>'; return; }
+	if(!rows || rows.length===0){ 
+		reportsTableBody.innerHTML = '<tr><td colspan="10">Nenhum atendimento registrado para os filtros selecionados.</td></tr>';
+		if(reportsTotalEl) reportsTotalEl.textContent = 'Total de atendimentos: 0';
+		return; 
+	}
+
+	// atualizar contador com o número de linhas filtradas
+	if(reportsTotalEl) reportsTotalEl.textContent = `Total de atendimentos: ${rows.length}`;
 
 	// aplicar ordenação
 	rows.sort((a,b)=>{
@@ -246,7 +258,8 @@ async function exportCsv(){
 		const dt = r.datetime ? showRawDateTime(r.datetime) : '';
 		return [r.name, r.document, r.endereco || '', r.bairro || '', r.cidade || '', r.telefone || '', r.departamento, dt, horario, r.ticket||''];
 	});
-	const csv = [header, ...csvRows].map(r=>r.map(cell=>`"${String(cell).replace(/"/g,'""')}"`).join(',')).join('\r\n');
+	// Usar ponto-e-vírgula como separador (formato comum no Brasil)
+	const csv = [header, ...csvRows].map(r=>r.map(cell=>`"${String(cell).replace(/"/g,'""')}"`).join(';')).join('\r\n');
 	const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
 	const url = URL.createObjectURL(blob);
 	const a = document.createElement('a');
@@ -280,6 +293,14 @@ function waitForSupabase(timeoutMs = 5000, intervalMs = 300){
 // inicializar tabela (async): tenta aguardar Supabase por alguns instantes e em seguida renderiza
 (async ()=>{
 	const ready = await waitForSupabase(5000, 250);
+	// definir data início padrão como hoje, caso o campo esteja vazio
+	try{
+		if(reportFrom && !reportFrom.value){
+			const now = new Date();
+			const pad = (n)=> String(n).padStart(2,'0');
+			reportFrom.value = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
+		}
+	}catch(e){ console.warn('Erro ao setar data padrão de início', e); }
 	// se não estiver pronto, ainda assim chamamos para exibir mensagem com botão de retry
 	await renderReportsTableAsync();
 	if(!ready){
