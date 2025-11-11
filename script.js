@@ -122,9 +122,11 @@ async function getRemoteMaxTicketForSalaToday(sala){
 	const visible = getVisibleSalaForDept(sala);
 	if(!window.supabase || !window.navigator.onLine) return 0;
 	try{
-		const todayStart = new Date();
-		todayStart.setHours(0,0,0,0);
-		const fromISO = formatLocalTimestamp(todayStart);
+	const todayStart = new Date();
+	todayStart.setHours(0,0,0,0);
+	// usar ISO completo (UTC) para evitar problemas de comparação com timestamps no banco
+	const fromISO = todayStart.toISOString();
+	console.info('[getRemoteMaxTicketForSalaToday] fromISO:', fromISO, 'visible:', visible);
 		// buscar registros de hoje e extrair sufixo numérico
 		const { data, error } = await window.supabase.from('atendimentos').select('senha,created_at').gte('created_at', fromISO).order('created_at', { ascending: false }).limit(2000);
 		if(error) { console.warn('getRemoteMaxTicketForSalaToday supabase error', error); return 0; }
@@ -152,19 +154,29 @@ async function getNextTicketNumber(sala){
 	// usar contador por SALA visível (ex: 6) — PAT (6) e Seguro (60) dividem a mesma sequência
 	state.lastTicketBySala = state.lastTicketBySala || {};
 	const visible = getVisibleSalaForDept(sala);
-	// se já temos contador local para hoje na sala visível, incrementar e retornar
+	// Sempre tentar obter do remoto quando houver conexão — evita que cada máquina mantenha seu próprio contador desatualizado
+	if(window.supabase && window.navigator.onLine){
+		try{
+			const base = await getRemoteMaxTicketForSalaToday(visible);
+			const next = (base || 0) + 1;
+			state.lastTicketBySala[visible] = next;
+			saveState();
+			return next;
+		}catch(e){
+			console.warn('getNextTicketNumber: falha ao obter remoto, caindo para fallback local', e);
+			// fallback intencional para local
+		}
+	}
+	// fallback offline ou remoto falhou: usar contador local (pode divergir entre máquinas)
 	if(typeof state.lastTicketBySala[visible] === 'number' && state.lastTicketBySala[visible] > 0){
 		state.lastTicketBySala[visible] = state.lastTicketBySala[visible] + 1;
 		saveState();
 		return state.lastTicketBySala[visible];
 	}
-	// caso contrário, tentar buscar remoto o maior número do dia para a sala visível
-	let base = 0;
-	try{ base = await getRemoteMaxTicketForSalaToday(visible); }catch(_){ base = 0; }
-	const next = (base || 0) + 1;
-	state.lastTicketBySala[visible] = next;
+	// último recurso: iniciar em 1
+	state.lastTicketBySala[visible] = 1;
 	saveState();
-	return next;
+	return 1;
 }
 
 function incrementDailyCount(){
@@ -203,150 +215,6 @@ async function pushAtendimentoToDb(at){
 		// fallback: grava no state.history já existente (já fazemos isso localmente)
 		return { success: false, error: 'no-supabase' };
 	}
-}
-
-// Tenta criar um atendimento no banco garantindo que a senha seja gerada/reservada de forma atômica.
-// Estratégia:
-// 1) Se existir função RPC 'next_counter' no banco (Supabase), chamamos ela para obter o próximo número atômico
-//    e então inserimos o atendimento com a senha retornada.
-// 2) Se RPC não estiver disponível, tentamos por até `maxAttempts` vezes: buscar MAX(sufixo) remoto, calcular next,
-//    montar senha e tentar inserir. Se o INSERT falhar por conflito, repetimos (retry).
-async function createAtendimentoAtomic(payload, visibleSala, maxAttempts = 5){
-	// payload deve conter: mucipe_nome, munic_doc, dep_direcionado, created_at (etc)
-	if(!window.supabase || !window.navigator.onLine) return { success:false, error: 'no-supabase' };
-	const today = getTodayKey();
-	// 1) tentar RPC next_counter
-	try{
-		if(typeof window.supabase.rpc === 'function'){
-			try{
-				const key = `sala:${String(visibleSala)}`;
-				const { data, error } = await window.supabase.rpc('next_counter', { p_key: key, p_date: today });
-				if(error){ console.warn('next_counter rpc error', error); }
-				else if(data !== null && typeof data !== 'undefined'){
-					const num = parseInt(data,10);
-					if(Number.isFinite(num)){
-						const ticket = formatTicket(num, visibleSala);
-						const insPayload = Object.assign({}, payload, { senha: ticket });
-						const { data: insData, error: insErr } = await window.supabase.from('atendimentos').insert([insPayload]).select().maybeSingle();
-						if(insErr){
-							// se houver conflito de unicidade, não falhar imediatamente: cair no fallback de retry
-							const code = (insErr && (insErr.code || insErr.status)) || null;
-							console.warn('insert after rpc error', insErr);
-							if(code === '23505' || code === 409 || (insErr && insErr.message && /duplicate|unique/i.test(String(insErr.message)))){
-								console.info('duplicate detected after RPC insert, falling back to retry loop');
-								// cair no fallback abaixo
-							} else {
-								return { success:false, error: insErr };
-							}
-						} else {
-							return { success:true, data: insData, number: num, ticket };
-						}
-					}
-				}
-			}catch(e){ console.warn('RPC next_counter call failed', e); }
-		}
-	}catch(e){ console.warn('createAtendimentoAtomic rpc attempt failed', e); }
-
-	// 2) fallback: tentar loop de tentativa/erro usando SELECT MAX + INSERT
-	const baseDelay = 120; // ms base
-	for(let attempt=0; attempt<maxAttempts; attempt++){
-		try{
-			// buscar registros hoje e extrair maior sufixo para esta sala visível
-			const todayStart = new Date(); todayStart.setHours(0,0,0,0);
-			const fromISO = formatLocalTimestamp(todayStart);
-			const { data, error } = await window.supabase.from('atendimentos').select('senha,created_at').gte('created_at', fromISO).order('created_at', { ascending: false }).limit(2000);
-			if(error){ console.warn('fallback select error', error); }
-			let max = 0;
-			if(Array.isArray(data)){
-				data.forEach(r=>{
-					try{
-						if(!r || !r.senha) return;
-						const parts = String(r.senha).split('-');
-						if(parts.length < 2) return;
-						const prefix = parts[0].replace(/[^0-9]/g,'');
-						if(String(prefix) !== String(visibleSala)) return;
-						const numPart = parts[1].replace(/[^0-9]/g,'');
-						const n = parseInt(numPart,10);
-						if(Number.isFinite(n) && n>max) max = n;
-					}catch(_){ }
-				});
-			}
-			const next = (max || 0) + 1;
-			const ticket = formatTicket(next, visibleSala);
-			const insPayload = Object.assign({}, payload, { senha: ticket });
-			const { data: insData, error: insErr } = await window.supabase.from('atendimentos').insert([insPayload]).select().maybeSingle();
-			if(insErr){
-				// se houve conflito (ou outro erro), tentar novamente
-				console.warn(`Attempt ${attempt+1} insert error`, insErr);
-				// backoff exponencial com jitter
-				const wait = Math.round(baseDelay * Math.pow(2, attempt) + Math.random()*200);
-				await new Promise(r=>setTimeout(r, wait));
-				continue;
-			}
-
-			// sucesso: verificar duplicatas (mesmo dia e mesma senha)
-			try{
-				const dayStart = new Date(); dayStart.setHours(0,0,0,0);
-				const dayEnd = new Date(); dayEnd.setHours(23,59,59,999);
-				const fromISO = formatLocalTimestamp(dayStart);
-				const toISO = formatLocalTimestamp(dayEnd);
-				const { data: dupRows } = await window.supabase.from('atendimentos').select('id,created_at').eq('senha', ticket).gte('created_at', fromISO).lte('created_at', toISO);
-				if(Array.isArray(dupRows) && dupRows.length > 1){
-					console.warn('Duplicate ticket detected after insert for', ticket, 'rows:', dupRows.length);
-					// tentar resolver atualizando o registro recém-inserido para um novo ticket
-					const insertedId = insData && insData.id;
-					let resolved = false;
-					const maxResolveAttempts = 5;
-					for(let rAttempt=0; rAttempt<maxResolveAttempts; rAttempt++){
-						try{
-							// recalcular next (baseado no maior existente agora)
-							const { data: selNow, error: selErr } = await window.supabase.from('atendimentos').select('senha,created_at').gte('created_at', fromISO).order('created_at', { ascending: false }).limit(2000);
-							let curMax = 0;
-							if(Array.isArray(selNow)){
-								selNow.forEach(rr=>{
-									try{
-										if(!rr || !rr.senha) return;
-										const parts = String(rr.senha).split('-');
-										if(parts.length < 2) return;
-										const prefix = parts[0].replace(/[^0-9]/g,'');
-										if(String(prefix) !== String(visibleSala)) return;
-										const numPart = parts[1].replace(/[^0-9]/g,'');
-										const n = parseInt(numPart,10);
-										if(Number.isFinite(n) && n>curMax) curMax = n;
-									}catch(_){ }
-								});
-							}
-							const newNum = (curMax || 0) + 1;
-							const newTicket = formatTicket(newNum, visibleSala);
-							// tentar atualizar o registro inserido
-							const { data: updData, error: updErr } = await window.supabase.from('atendimentos').update({ senha: newTicket }).eq('id', insertedId).select().maybeSingle();
-							if(updErr){ console.warn('Attempt to update duplicate record failed', updErr); }
-							else {
-								// checar se a atualização resolveu duplicata
-								const { data: checkRows } = await window.supabase.from('atendimentos').select('id').eq('senha', newTicket).gte('created_at', fromISO).lte('created_at', toISO);
-								if(Array.isArray(checkRows) && checkRows.length === 1){
-									console.info('Duplicate resolved by updating inserted record to', newTicket);
-									resolved = true;
-									return { success:true, data: updData || insData, number: newNum, ticket: newTicket, resolved:true };
-								}
-							}
-						}catch(e){ console.warn('resolve attempt exception', e); }
-						// esperar antes de próxima tentativa
-						const wait = Math.round(baseDelay * Math.pow(2, rAttempt) + Math.random()*300);
-						await new Promise(r=>setTimeout(r, wait));
-					}
-					// se não resolvido automaticamente, notificar o usuário
-					if(!resolved){
-						try{ alert('Atenção: possível duplicata de senha detectada. Favor verificar o painel e resolver manualmente.'); }catch(_){ }
-						return { success:true, data: insData, number: next, ticket, warning: 'duplicate_unresolved' };
-					}
-				}
-			}catch(e){ console.warn('post-insert duplicate check failed', e); }
-
-			return { success:true, data: insData, number: next, ticket };
-		}catch(e){ console.warn('createAtendimentoAtomic fallback exception', e); await new Promise(r=>setTimeout(r, 200)); }
-	}
-	return { success:false, error: 'max-retries' };
 }
 
 async function pushUserToDb(user){
@@ -1877,44 +1745,61 @@ if(receptionForm){
 
 	// garantir reset diário da numeração de senhas (por sala)
 	ensureDailyTicketReset();
+	// obter próximo número de ticket para a SALA VISÍVEL (PAT e Seguro compartilham sequência)
+	let perSalaNumber = 1;
 	const visibleSala = getVisibleSalaForDept(sala);
+	try{ perSalaNumber = await getNextTicketNumber(sala); }catch(e){ perSalaNumber = (state.lastTicketBySala && state.lastTicketBySala[visibleSala]) ? state.lastTicketBySala[visibleSala] : 1; }
+	const ticket = formatTicket(perSalaNumber, visibleSala);
+		const entry = { id: perSalaNumber, name, document: documentEl, preferencial, sala, ticket, createdAt: Date.now() };
 
-	// preparar payload sem a senha — a senha será reservada no momento do insert por createAtendimentoAtomic
-	const entryPayload = { mucipe_nome: name, munic_doc: documentEl, dep_direcionado: String(sala), created_at: formatLocalTimestamp(Date.now()) };
-
-	// Sistema exige estar online para criar atendimentos; não geramos tickets localmente
-	if(!(window.supabase && window.navigator.onLine)){
-		alert('Operação disponível somente quando o sistema estiver online. Conecte-se à internet e tente novamente.');
-		return;
-	}
-
-	// chamar rotina atômica para reservar e inserir a senha no momento do clique
-	const res = await createAtendimentoAtomic(entryPayload, visibleSala, 6);
-	if(!res || !res.success){
-		console.warn('createAtendimentoAtomic failed', res && res.error);
-		alert('Falha ao criar atendimento no servidor. Tente novamente.');
-		return;
-	}
-
-	// resultado bem sucedido — construir entrada local com os dados retornados
-	const ticket = res.ticket || res.data && res.data.senha || '';
-	const number = res.number || null;
-	const entry = { id: number || Date.now(), name, document: documentEl, preferencial, sala, ticket, createdAt: Date.now(), remoteSynced: true, remoteId: res.data && res.data.id };
-
-	// inserir localmente na fila (mesma lógica de preferencial)
+		// inserir: manipular uma cópia local da fila e só depois reatribuir para evitar condições de corrida com polling
 	let q = state.queues[String(sala)] || [];
-	if(preferencial){
-		let idx = q.findIndex(x=>!x.preferencial);
-		if(idx===-1) q.push(entry); else q.splice(idx,0,entry);
-	} else { q.push(entry); }
+		if(preferencial){
+			let idx = q.findIndex(x=>!x.preferencial);
+			if(idx===-1) q.push(entry); else q.splice(idx,0,entry);
+		} else {
+			q.push(entry);
+		}
+	// garantir reatribuição ao estado (caso polling tenha reiniciado state.queues)
 	state.queues[String(sala)] = q;
-	saveState();
-	ticketIssuedEl.textContent = `Registro realizado. Dirija-se à sala ${visibleSala}. Senha: ${ticket}`;
-	incrementDailyCount();
 
-	// atualizar contador remoto/local imediatamente
-	try{ if(window.supabase && window.navigator.onLine) fetchRemoteTodayCount(); }catch(_){ }
-	receptionForm.reset();
+    				saveState();
+    					saveState();
+						ticketIssuedEl.textContent = `Registro realizado. Dirija-se à sala ${visibleSala}. Senha: ${ticket}`;
+    						// incrementar contador diário (pessoa passou pela recepção)
+    						incrementDailyCount();
+				    		// Sistema exige estar online para criar atendimentos; não geramos tickets localmente
+				    		if(!(window.supabase && window.navigator.onLine)){
+				    			alert('Operação disponível somente quando o sistema estiver online. Conecte-se à internet e tente novamente.');
+				    			return;
+				    		}
+				    		// tentar criar atendimento diretamente no Supabase com a senha gerada localmente a partir do contador remoto
+				    		try{
+				    			// garantir que o next ticket por sala esteja alinhado com o remoto
+								const perSalaNumber = state.lastTicketBySala && state.lastTicketBySala[visibleSala] ? state.lastTicketBySala[visibleSala] : await getNextTicketNumber(sala);
+								const remoteTicket = formatTicket(perSalaNumber, visibleSala);
+								// enviar dep_direcionado como o departamento real selecionado (ex: '60')
+								const payload = { mucipe_nome: entry.name, munic_doc: entry.document, dep_direcionado: String(entry.sala), senha: remoteTicket, created_at: formatLocalTimestamp(entry.createdAt) };
+				    			const { data, error } = await window.supabase.from('atendimentos').insert([payload]).select().maybeSingle();
+				    			if(error){
+				    				console.warn('create atendimento supabase error', error);
+				    				alert('Falha ao criar atendimento no servidor. Tente novamente.');
+				    				return;
+				    			}
+				    			// atualizar entry com dados retornados
+				    			entry.remoteSynced = true;
+				    			entry.remoteId = data && data.id;
+				    			entry.ticket = data && data.senha ? data.senha : remoteTicket;
+				    			// confirmar que o contador local por sala foi incrementado (getNextTicketNumber já fez isso)
+				    			saveState();
+				    		}catch(e){
+				    			console.warn('Erro ao inserir atendimento remoto', e);
+				    			alert('Erro ao criar atendimento no servidor.');
+				    			return;
+				    		}
+						// atualizar contador remoto/local imediatamente
+						try{ if(window.supabase && window.navigator.onLine) fetchRemoteTodayCount(); }catch(_){ }
+    			receptionForm.reset();
 				// limpar seleção e esconder formulário inline caso esteja aberto
 				selectedMunicipe = null;
 				const selectedInfoEl = document.getElementById('selectedInfo');
