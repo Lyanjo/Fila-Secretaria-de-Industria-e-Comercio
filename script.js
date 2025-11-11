@@ -15,7 +15,8 @@ const SALAS = {
 	6: 'Sala 6 - PAT',
 	60: 'Sala 6 - Seguro Desemprego',
 	7: 'Sala 7 - Preenchimento',
-	8: 'Sala 8 - SEBRAE'
+	8: 'Sala 8 - SEBRAE',
+	9: 'Sala 9 - Prestador de Serviços à Comunidade'
 };
 
 // Retorna a sala visível (ex: '6') para um deptKey (ex: '6' ou '60') baseando-se no rótulo antes do ' - '
@@ -122,11 +123,9 @@ async function getRemoteMaxTicketForSalaToday(sala){
 	const visible = getVisibleSalaForDept(sala);
 	if(!window.supabase || !window.navigator.onLine) return 0;
 	try{
-	const todayStart = new Date();
-	todayStart.setHours(0,0,0,0);
-	// usar ISO completo (UTC) para evitar problemas de comparação com timestamps no banco
-	const fromISO = todayStart.toISOString();
-	console.info('[getRemoteMaxTicketForSalaToday] fromISO:', fromISO, 'visible:', visible);
+		const todayStart = new Date();
+		todayStart.setHours(0,0,0,0);
+		const fromISO = formatLocalTimestamp(todayStart);
 		// buscar registros de hoje e extrair sufixo numérico
 		const { data, error } = await window.supabase.from('atendimentos').select('senha,created_at').gte('created_at', fromISO).order('created_at', { ascending: false }).limit(2000);
 		if(error) { console.warn('getRemoteMaxTicketForSalaToday supabase error', error); return 0; }
@@ -154,29 +153,19 @@ async function getNextTicketNumber(sala){
 	// usar contador por SALA visível (ex: 6) — PAT (6) e Seguro (60) dividem a mesma sequência
 	state.lastTicketBySala = state.lastTicketBySala || {};
 	const visible = getVisibleSalaForDept(sala);
-	// Sempre tentar obter do remoto quando houver conexão — evita que cada máquina mantenha seu próprio contador desatualizado
-	if(window.supabase && window.navigator.onLine){
-		try{
-			const base = await getRemoteMaxTicketForSalaToday(visible);
-			const next = (base || 0) + 1;
-			state.lastTicketBySala[visible] = next;
-			saveState();
-			return next;
-		}catch(e){
-			console.warn('getNextTicketNumber: falha ao obter remoto, caindo para fallback local', e);
-			// fallback intencional para local
-		}
-	}
-	// fallback offline ou remoto falhou: usar contador local (pode divergir entre máquinas)
+	// se já temos contador local para hoje na sala visível, incrementar e retornar
 	if(typeof state.lastTicketBySala[visible] === 'number' && state.lastTicketBySala[visible] > 0){
 		state.lastTicketBySala[visible] = state.lastTicketBySala[visible] + 1;
 		saveState();
 		return state.lastTicketBySala[visible];
 	}
-	// último recurso: iniciar em 1
-	state.lastTicketBySala[visible] = 1;
+	// caso contrário, tentar buscar remoto o maior número do dia para a sala visível
+	let base = 0;
+	try{ base = await getRemoteMaxTicketForSalaToday(visible); }catch(_){ base = 0; }
+	const next = (base || 0) + 1;
+	state.lastTicketBySala[visible] = next;
 	saveState();
-	return 1;
+	return next;
 }
 
 function incrementDailyCount(){

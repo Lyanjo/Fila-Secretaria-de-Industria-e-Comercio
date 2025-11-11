@@ -9,6 +9,7 @@ const SALAS = {
 	60: 'Sala 6 - Seguro Desemprego',
 	7: 'Sala 7 - Preenchimento',
 	8: 'Sala 8 - SEBRAE'
+	,9: 'Sala 9 - Prestador de Serviços à Comunidade'
 };
 
 function loadState(){
