@@ -1732,62 +1732,86 @@ if(receptionForm){
 	state.queues = state.queues || {};
 	state.queues[String(sala)] = state.queues[String(sala)] || [];
 
-	// garantir reset diário da numeração de senhas (por sala)
-	ensureDailyTicketReset();
-	// obter próximo número de ticket para a SALA VISÍVEL (PAT e Seguro compartilham sequência)
-	let perSalaNumber = 1;
-	const visibleSala = getVisibleSalaForDept(sala);
-	try{ perSalaNumber = await getNextTicketNumber(sala); }catch(e){ perSalaNumber = (state.lastTicketBySala && state.lastTicketBySala[visibleSala]) ? state.lastTicketBySala[visibleSala] : 1; }
-	const ticket = formatTicket(perSalaNumber, visibleSala);
-		const entry = { id: perSalaNumber, name, document: documentEl, preferencial, sala, ticket, createdAt: Date.now() };
+	// Sistema exige estar online para criar atendimentos (backend gerencia senhas)
+	if(!(window.supabase && window.navigator.onLine)){
+		alert('Operação disponível somente quando o sistema estiver online. Conecte-se à internet e tente novamente.');
+		return;
+	}
 
-		// inserir: manipular uma cópia local da fila e só depois reatribuir para evitar condições de corrida com polling
-	let q = state.queues[String(sala)] || [];
+	// Obter sala visível (6 e 60 compartilham sequência, ambos mapeiam para '6')
+	const visibleSala = getVisibleSalaForDept(sala);
+
+	try{
+		// 1. Obter próxima senha via RPC (backend incrementa automaticamente)
+		const { data: senha, error: rpcError } = await window.supabase
+			.rpc('obter_proxima_senha', { p_departamento: String(visibleSala) });
+
+		if(rpcError){
+			console.error('Erro ao obter próxima senha:', rpcError);
+			alert('Erro ao gerar senha. Tente novamente.');
+			return;
+		}
+
+		// 2. Criar atendimento com a senha obtida
+		const payload = {
+			mucipe_nome: name,
+			munic_doc: documentEl,
+			dep_direcionado: String(sala), // mantém o dept real (6 ou 60)
+			senha: senha,
+			created_at: new Date().toISOString()
+		};
+
+		const { data: atendimento, error: insertError } = await window.supabase
+			.from('atendimentos')
+			.insert([payload])
+			.select()
+			.single();
+
+		if(insertError){
+			console.error('Erro ao criar atendimento:', insertError);
+			alert('Falha ao criar atendimento no servidor. Tente novamente.');
+			return;
+		}
+
+		// 3. Criar entrada local para fila/UI
+		const entry = {
+			id: atendimento.id || Date.now(),
+			name,
+			document: documentEl,
+			preferencial,
+			sala,
+			ticket: senha,
+			createdAt: Date.now(),
+			remoteSynced: true,
+			remoteId: atendimento.id
+		};
+
+		// Inserir na fila local (preferenciais primeiro)
+		let q = state.queues[String(sala)] || [];
 		if(preferencial){
 			let idx = q.findIndex(x=>!x.preferencial);
-			if(idx===-1) q.push(entry); else q.splice(idx,0,entry);
+			if(idx===-1) q.push(entry);
+			else q.splice(idx, 0, entry);
 		} else {
 			q.push(entry);
 		}
-	// garantir reatribuição ao estado (caso polling tenha reiniciado state.queues)
-	state.queues[String(sala)] = q;
+		state.queues[String(sala)] = q;
+		saveState();
 
-    				saveState();
-    					saveState();
-						ticketIssuedEl.textContent = `Registro realizado. Dirija-se à sala ${visibleSala}. Senha: ${ticket}`;
-    						// incrementar contador diário (pessoa passou pela recepção)
-    						incrementDailyCount();
-				    		// Sistema exige estar online para criar atendimentos; não geramos tickets localmente
-				    		if(!(window.supabase && window.navigator.onLine)){
-				    			alert('Operação disponível somente quando o sistema estiver online. Conecte-se à internet e tente novamente.');
-				    			return;
-				    		}
-				    		// tentar criar atendimento diretamente no Supabase com a senha gerada localmente a partir do contador remoto
-				    		try{
-				    			// garantir que o next ticket por sala esteja alinhado com o remoto
-								const perSalaNumber = state.lastTicketBySala && state.lastTicketBySala[visibleSala] ? state.lastTicketBySala[visibleSala] : await getNextTicketNumber(sala);
-								const remoteTicket = formatTicket(perSalaNumber, visibleSala);
-								// enviar dep_direcionado como o departamento real selecionado (ex: '60')
-								const payload = { mucipe_nome: entry.name, munic_doc: entry.document, dep_direcionado: String(entry.sala), senha: remoteTicket, created_at: formatLocalTimestamp(entry.createdAt) };
-				    			const { data, error } = await window.supabase.from('atendimentos').insert([payload]).select().maybeSingle();
-				    			if(error){
-				    				console.warn('create atendimento supabase error', error);
-				    				alert('Falha ao criar atendimento no servidor. Tente novamente.');
-				    				return;
-				    			}
-				    			// atualizar entry com dados retornados
-				    			entry.remoteSynced = true;
-				    			entry.remoteId = data && data.id;
-				    			entry.ticket = data && data.senha ? data.senha : remoteTicket;
-				    			// confirmar que o contador local por sala foi incrementado (getNextTicketNumber já fez isso)
-				    			saveState();
-				    		}catch(e){
-				    			console.warn('Erro ao inserir atendimento remoto', e);
-				    			alert('Erro ao criar atendimento no servidor.');
-				    			return;
-				    		}
-						// atualizar contador remoto/local imediatamente
-						try{ if(window.supabase && window.navigator.onLine) fetchRemoteTodayCount(); }catch(_){ }
+		// 4. Mostrar senha para o usuário
+		ticketIssuedEl.textContent = `Registro realizado. Dirija-se à sala ${visibleSala}. Senha: ${senha}`;
+
+		// Incrementar contador diário
+		incrementDailyCount();
+
+		// Atualizar contador remoto/local
+		try{ fetchRemoteTodayCount(); }catch(_){}
+
+	}catch(err){
+		console.error('Erro ao criar atendimento:', err);
+		alert('Erro ao criar atendimento. Tente novamente.');
+		return;
+	}
     			receptionForm.reset();
 				// limpar seleção e esconder formulário inline caso esteja aberto
 				selectedMunicipe = null;
@@ -2035,6 +2059,8 @@ function handleHash(){
 			location.hash = 'reception'; return;
 		}
 		showScreen('screen-users');
+		// Renderizar lista de usuários com botões de edição/desativação
+		renderUsersList();
 		// Renderizar apenas usuários remotos (do Supabase) e atualizar imediatamente
 		if(window.supabase && window.navigator.onLine) renderRemoteUsersList();
 	} else if(h.startsWith('dept-')){
@@ -2451,17 +2477,6 @@ async function renderRemoteUsersList(){
 	const usersListEl = document.getElementById('usersList');
 	if(!usersListEl) return;
 	usersListEl.innerHTML = '';
-	// header / refresh
-	const header = document.createElement('div');
-	header.style.display = 'flex';
-	header.style.justifyContent = 'space-between';
-	header.style.alignItems = 'center';
-	const title = document.createElement('div');
-	title.textContent = 'Usuários (remotos)';
-	title.style.fontWeight = '600';
-	header.appendChild(title);
-	// cabeçalho simples (sem botão de refresh manual)
-	usersListEl.appendChild(header);
 
 	if(!window.supabase){
 		const p = document.createElement('div');
@@ -2930,6 +2945,7 @@ if(state.currentUser){
 
 // chamada inicial para sincronizar UI
 updateAuthUI();
+// Renderizar lista de usuários DEPOIS de atualizar UI (garante que currentUser está definido)
 renderUsersList();
 
 // conectar listeners dos controles de filtro de usuários (se existirem)
@@ -2940,10 +2956,16 @@ renderUsersList();
 	if(qEl) qEl.addEventListener('input', ()=>{ renderUsersList(); });
 	if(deptEl) deptEl.addEventListener('change', ()=>{ renderUsersList(); });
 	if(sortEl) sortEl.addEventListener('change', ()=>{ renderUsersList(); });
-	// quando a tela de users for mostrada, focar o campo de busca
+	// quando a tela de users for mostrada, focar o campo de busca e forçar refresh dos botões
 	const usersNav = document.getElementById('navUsers');
 	if(usersNav){
-		usersNav.addEventListener('click', ()=>{ setTimeout(()=>{ if(qEl) qEl.focus(); },200); });
+		usersNav.addEventListener('click', ()=>{ 
+			setTimeout(()=>{ 
+				if(qEl) qEl.focus(); 
+				// Forçar renderização da lista para garantir que os botões apareçam
+				renderUsersList();
+			},200); 
+		});
 	}
 })();
 
@@ -3052,6 +3074,12 @@ function updateAuthUI(){
 				}
 			}catch(_){ }
 		}catch(e){ /* silent */ }
+		
+		// Atualizar lista de usuários sempre que a UI de autenticação mudar
+		// Garante que os botões apareçam corretamente quando currentUser estiver definido
+		if(typeof renderUsersList === 'function'){
+			renderUsersList();
+		}
 }
 
 // referência ao botão (adicionar perto das outras querySelectors / init)
