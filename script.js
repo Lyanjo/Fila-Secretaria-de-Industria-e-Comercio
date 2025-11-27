@@ -5,6 +5,12 @@
 // - preferencial entra à frente de não preferenciais (mas mantém ordem entre preferenciais)
 // - dados persistidos em localStorage
 
+// Função para normalizar documentos (remove pontos, traços e espaços)
+function normalizeDocument(doc) {
+	if (!doc) return '';
+	return String(doc).replace(/[.\-\s]/g, '').trim();
+}
+
 // lista de departamentos (chaves podem ser números ou códigos - suportamos '60' como Seguro Desemprego)
 const SALAS = {
 	1: 'Sala 1 - Junta Militar',
@@ -181,7 +187,7 @@ async function pushAtendimentoToDb(at){
 	// at: { name, document, preferencial, sala, ticket, createdAt }
 	if(window.supabase){
 		try{
-			const payload = { mucipe_nome: at.name, munic_doc: at.document, dep_direcionado: at.sala.toString(), senha: at.ticket, created_at: formatLocalTimestamp(at.createdAt) };
+			const payload = { mucipe_nome: at.name, munic_doc: normalizeDocument(at.document), dep_direcionado: at.sala.toString(), senha: at.ticket, created_at: formatLocalTimestamp(at.createdAt) };
 			const { data, error } = await window.supabase.from('atendimentos').insert([payload]).select().maybeSingle();
 			if(error){
 				console.warn('Supabase insert atendimentos error', error);
@@ -306,7 +312,16 @@ async function processSyncQueue(){
 		try{
 			if(op.type === 'createMunicipe'){
 				// tentar inserir o munícipe remoto
-				const payload = { nome: op.payload.name, documento: op.payload.document, preferencial: op.payload.preferencial, created_at: formatLocalTimestamp() };
+				const payload = { 
+					nome: op.payload.name, 
+					documento: op.payload.document, 
+					preferencial: op.payload.preferencial, 
+					endereco: op.payload.endereco || '', 
+					bairro: op.payload.bairro || '', 
+					cidade: op.payload.cidade || '', 
+					telefone: op.payload.telefone || '', 
+					created_at: formatLocalTimestamp() 
+				};
 				// usar upsert para evitar conflito quando já existe um registro com mesmo documento
 				console.info('[processSyncQueue:createMunicipe] payload:', payload);
 				const upsertMun = window.supabase.from('municipes').upsert([payload], { onConflict: ['documento'] });
@@ -421,7 +436,7 @@ async function processSyncQueue(){
 				}
 			} else if(op.type === 'createAtendimento'){
 				const at = op.payload;
-				const payload = { mucipe_nome: at.name, munic_doc: at.document, dep_direcionado: at.sala.toString(), senha: at.ticket, created_at: formatLocalTimestamp(at.createdAt) };
+				const payload = { mucipe_nome: at.name, munic_doc: normalizeDocument(at.document), dep_direcionado: at.sala.toString(), senha: at.ticket, created_at: formatLocalTimestamp(at.createdAt) };
 				if(at && at.inicio_atendimento) payload.inicio_atendimento = at.inicio_atendimento;
 				if(typeof at.concluido !== 'undefined') payload.concluido = !!at.concluido;
 				const { data, error } = await window.supabase.from('atendimentos').insert([payload]).select().maybeSingle();
@@ -1133,6 +1148,9 @@ function escapeHtml(str) {
 // Formata timestamp no formato local sem informação de fuso (YYYY-MM-DD HH:MM:SS)
 function formatLocalTimestamp(input){
 	const d = input ? new Date(input) : new Date();
+	// Subtrair 3 horas para compensar o fuso horário UTC do Postgres
+	// Quando enviamos 15h, o Postgres interpreta como UTC e exibe 18h (UTC-3 = BRT)
+	d.setHours(d.getHours() - 3);
 	const pad = (n)=> String(n).padStart(2,'0');
 	return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
@@ -1430,7 +1448,16 @@ function onCompleteClick(e){
 				alert('Atualização falhou — dados salvos localmente e serão sincronizados.');
 				// se erro de permissão (401) ou RLS (42501), enfileirar para tentar depois
 				if(!muni.localId) muni.localId = 'local-' + Date.now() + '-' + Math.floor(Math.random()*1000);
-				enqueueSync({ type: 'createMunicipe', payload: { name: muni.nome, document: muni.documento, preferencial: !!muni.preferencial, localId: muni.localId } });
+				enqueueSync({ type: 'createMunicipe', payload: { 
+					name: muni.nome, 
+					document: muni.documento, 
+					preferencial: !!muni.preferencial, 
+					endereco: muni.endereco || '', 
+					bairro: muni.bairro || '', 
+					cidade: muni.cidade || '', 
+					telefone: muni.telefone || '', 
+					localId: muni.localId 
+				}});
 			}
 		}finally{
 			// sempre retomar o polling da sala ao finalizar (sucesso ou falha)
@@ -1473,7 +1500,16 @@ async function updateMunicipeDetails(muni){
             if(!muni.localId) muni.localId = 'local-' + Date.now() + '-' + Math.floor(Math.random()*1000);
             const exists = state.municipes.find(x=>x.localId === muni.localId || x.documento === muni.documento);
             if(!exists) state.municipes.push(muni);
-            enqueueSync({ type: 'createMunicipe', payload: { name: muni.nome, document: muni.documento, preferencial: !!muni.preferencial, localId: muni.localId } });
+            enqueueSync({ type: 'createMunicipe', payload: { 
+				name: muni.nome, 
+				document: muni.documento, 
+				preferencial: !!muni.preferencial, 
+				endereco: muni.endereco || '', 
+				bairro: muni.bairro || '', 
+				cidade: muni.cidade || '', 
+				telefone: muni.telefone || '', 
+				localId: muni.localId 
+			}});
             saveState();
             return muni;
         }
@@ -1669,7 +1705,7 @@ async function callNextFor(sala){
 				// sem remoteId: tentar inserir um registro remoto com inicio_atendimento
 			if(window.supabase && window.navigator.onLine){
 				try{
-						const payload = { mucipe_nome: at.name, munic_doc: at.document, dep_direcionado: String(at.sala || sala), senha: at.ticket, created_at: formatLocalTimestamp(at.createdAt), inicio_atendimento: inicioTs, concluido: false };
+						const payload = { mucipe_nome: at.name, munic_doc: normalizeDocument(at.document), dep_direcionado: String(at.sala || sala), senha: at.ticket, created_at: formatLocalTimestamp(at.createdAt), inicio_atendimento: inicioTs, concluido: false };
 						const { data, error } = await window.supabase.from('atendimentos').insert([payload]).select().maybeSingle();
 					if(error){ console.warn('insert inicio_atendimento failed', error); // enfileirar para retry
 						// enfileira payload com inicio_atendimento para criar posteriormente
@@ -1752,16 +1788,14 @@ if(receptionForm){
 			return;
 		}
 
-		// 2. Criar atendimento com a senha obtida
-		const payload = {
-			mucipe_nome: name,
-			munic_doc: documentEl,
-			dep_direcionado: String(sala), // mantém o dept real (6 ou 60)
-			senha: senha,
-			created_at: new Date().toISOString()
-		};
-
-		const { data: atendimento, error: insertError } = await window.supabase
+	// 2. Criar atendimento com a senha obtida
+	const payload = {
+		mucipe_nome: name,
+		munic_doc: documentEl,
+		dep_direcionado: String(sala), // mantém o dept real (6 ou 60)
+		senha: senha
+		// created_at será gerado automaticamente pelo Supabase com default: now() AT TIME ZONE 'America/Sao_Paulo'
+	};		const { data: atendimento, error: insertError } = await window.supabase
 			.from('atendimentos')
 			.insert([payload])
 			.select()
@@ -1836,12 +1870,25 @@ const regCancelBtn = document.getElementById('reg_cancel');
 async function createMunicipe(m){
 	// m: { name, document, preferencial, endereco?, bairro?, cidade?, telefone? }
 	state.municipes = state.municipes || [];
+	
+	// Normalizar documento (remover pontos, traços e espaços)
+	const docNormalizado = normalizeDocument(m.document);
+	
 	// gerar localId para referencia quando criado offline
 	const localId = 'local-' + Date.now() + '-' + Math.floor(Math.random()*1000);
 	try{
 		if(window.supabase){
 			// tentar inserir na tabela 'municipes' e retornar o registro criado
-			const payload = { nome: m.name, documento: m.document, preferencial: !!m.preferencial, endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', created_at: formatLocalTimestamp() };
+			const payload = { 
+				nome: m.name, 
+				documento: docNormalizado, 
+				preferencial: !!m.preferencial, 
+				endereco: m.endereco || '', 
+				bairro: m.bairro || '', 
+				cidade: m.cidade || '', 
+				telefone: m.telefone || '', 
+				created_at: formatLocalTimestamp() 
+			};
 			// usar upsert com onConflict para evitar erro de chave única (documento)
 			console.info('[createMunicipe] payload:', payload);
 			const upsertMunQ = window.supabase.from('municipes').upsert([payload], { onConflict: ['documento'] });
@@ -1853,21 +1900,21 @@ async function createMunicipe(m){
 			return { nome: data.nome, documento: data.documento, id: data.id, preferencial: data.preferencial, endereco: data.endereco, bairro: data.bairro, cidade: data.cidade, telefone: data.telefone };
 		} else {
 			// fallback: gravar localmente
-			const existing = state.municipes.find(x=>x.documento === m.document);
+			const existing = state.municipes.find(x=>normalizeDocument(x.documento) === docNormalizado);
 			if(existing) return existing;
-			const rec = { nome: m.name, documento: m.document, preferencial: !!m.preferencial, endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', createdAt: formatLocalTimestamp(), localId };
+			const rec = { nome: m.name, documento: docNormalizado, preferencial: !!m.preferencial, endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', createdAt: formatLocalTimestamp(), localId };
 			state.municipes.push(rec);
 			// enfileirar criação remota para quando online
-			enqueueSync({ type: 'createMunicipe', payload: { name: m.name, document: m.document, preferencial: !!m.preferencial, endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', localId } });
+			enqueueSync({ type: 'createMunicipe', payload: { name: m.name, document: docNormalizado, preferencial: !!m.preferencial, endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', localId } });
 			saveState();
 			return rec;
 		}
 	}catch(e){
 		// em caso de erro com Supabase, fallback local
 		console.warn('createMunicipe fallback local', e);
-		const existing = state.municipes.find(x=>x.documento === m.document);
+		const existing = state.municipes.find(x=>normalizeDocument(x.documento) === docNormalizado);
 		if(existing) return existing;
-	const rec = { nome: m.name, documento: m.document, preferencial: !!m.preferencial, endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', createdAt: formatLocalTimestamp(), localId };
+	const rec = { nome: m.name, documento: docNormalizado, preferencial: !!m.preferencial, endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', createdAt: formatLocalTimestamp(), localId };
 		state.municipes.push(rec);
 		enqueueSync({ type: 'createMunicipe', payload: { name: m.name, document: m.document, preferencial: !!m.preferencial, endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', localId } });
 		saveState();

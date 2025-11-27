@@ -28,7 +28,7 @@ function initNavigation() {
       sectionBaseGeral.classList.remove('hidden');
       navBaseGeral.classList.add('active');
       // Atualizar relatórios quando entrar na base geral
-      renderTable();
+      renderReportsTableAsync();
     }
   }
 
@@ -189,7 +189,7 @@ async function fetchAtendimentosFromSupabase(startDate, endDate) {
       }
       
       allData = allData.concat(data);
-      console.log(`Página ${page}: ${data.length} registros (total acumulado: ${allData.length})`);
+      // Log removido para reduzir poluição do console
       
       // Se retornou menos que pageSize, não há mais páginas
       if (data.length < pageSize) {
@@ -205,36 +205,82 @@ async function fetchAtendimentosFromSupabase(startDate, endDate) {
       return [];
     }
     
-    // Buscar dados dos munícipes para preencher bairro
-    const docs = Array.from(new Set(allData.map(a => a.munic_doc).filter(Boolean)));
+    // Função para normalizar documento (remover pontos, traços e espaços)
+    const normalizeDoc = (doc) => {
+      if (!doc) return '';
+      return String(doc).replace(/[.\-\s]/g, '').trim();
+    };
+    
+    // Buscar TODOS os munícipes com PAGINAÇÃO para garantir compatibilidade
+    console.log(`📋 Dashboards - Buscando munícipes...`);
     let munMap = {};
     
-    if (docs.length > 0) {
-      const { data: munData, error: munErr } = await window.supabase
-        .from('municipes')
-        .select('*')
-        .in('documento', docs);
+    try {
+      let allMunicipes = [];
+      let page = 0;
+      const pageSize = 1000;
+      let hasMore = true;
       
-      if (!munErr && munData && Array.isArray(munData)) {
-        munMap = munData.reduce((acc, m) => { 
-          acc[m.documento] = m; 
-          return acc; 
-        }, {});
+      while (hasMore) {
+        const from = page * pageSize;
+        const to = from + pageSize - 1;
+        
+        const { data: munData, error: munErr } = await window.supabase
+          .from('municipes')
+          .select('*')
+          .range(from, to);
+        
+        if (munErr) {
+          console.warn('Erro ao buscar munícipes (página ' + page + '):', munErr);
+          break;
+        }
+        
+        if (!munData || munData.length === 0) {
+          hasMore = false;
+          break;
+        }
+        
+        allMunicipes = allMunicipes.concat(munData);
+        
+        if (munData.length < pageSize) {
+          hasMore = false;
+        }
+        
+        page++;
       }
+      
+      console.log(`✅ Dashboards - ${allMunicipes.length} munícipes carregados`);
+      
+      // Criar map com documento NORMALIZADO como chave
+      munMap = allMunicipes.reduce((acc, m) => { 
+        const normalizedDoc = normalizeDoc(m.documento);
+        acc[normalizedDoc] = m; 
+        return acc; 
+      }, {});
+      
+    } catch(e) {
+      console.error('Dashboards - Erro ao buscar munícipes:', e);
     }
     
-    // Mapear atendimentos com dados dos munícipes
+    // Mapear atendimentos com dados dos munícipes usando documento NORMALIZADO
     const atendimentos = allData.map(a => {
-      const m = (a.munic_doc && munMap[a.munic_doc]) ? munMap[a.munic_doc] : {};
-      return {
+      const docNormalizado = normalizeDoc(a.munic_doc);
+      const m = (docNormalizado && munMap[docNormalizado]) ? munMap[docNormalizado] : {};
+      
+      const atendimento = {
         sala: a.dep_direcionado,
         departamento: a.dep_direcionado,
         bairro: m.bairro || '',
+        endereco: m.endereco || '',
+        cidade: m.cidade || '',
+        telefone: m.telefone || '',
         datetime: a.created_at || a.inicio_atendimento || null,
         horario_atendimento: a.inicio_atendimento || null,
         nome: a.mucipe_nome || '',
         documento: a.munic_doc || ''
       };
+      
+      return atendimento;
     });
     
     // Filtrar localmente por data (usando created_at e MESMA MÁSCARA da Base Geral)
@@ -283,11 +329,11 @@ async function updateDeptChart() {
   const toInput = document.getElementById('deptChartTo');
   const totalEl = document.getElementById('deptChartTotal');
   
-  console.log('Atualizando gráfico de departamentos...', { from: fromInput.value, to: toInput.value });
+  // console.log removido
   
   const data = await fetchAtendimentosFromSupabase(fromInput.value, toInput.value);
   
-  console.log('Dados recebidos para departamentos:', data.length);
+  // console.log removido
   
   // Agrupar por departamento
   const deptCounts = {};
@@ -297,7 +343,7 @@ async function updateDeptChart() {
     deptCounts[deptName] = (deptCounts[deptName] || 0) + 1;
   });
   
-  console.log('Departamentos agrupados:', deptCounts);
+  // console.log removido
   
   // Ordenar por quantidade (decrescente) - igual pizza de bairros
   const sorted = Object.entries(deptCounts).sort((a, b) => b[1] - a[1]);
@@ -383,11 +429,11 @@ async function updateBairroChart() {
   const totalEl = document.getElementById('bairroChartTotal');
   const listEl = document.getElementById('bairroList');
   
-  console.log('Atualizando gráfico de bairros...', { from: fromInput.value, to: toInput.value });
+  // console.log removido
   
   const data = await fetchAtendimentosFromSupabase(fromInput.value, toInput.value);
   
-  console.log('Dados recebidos para bairros:', data.length);
+  // console.log removido
   
   // Agrupar por bairro
   const bairroCounts = {};
@@ -396,7 +442,7 @@ async function updateBairroChart() {
     bairroCounts[bairro] = (bairroCounts[bairro] || 0) + 1;
   });
   
-  console.log('Bairros agrupados:', bairroCounts);
+  // console.log removido
   
   // Ordenar por quantidade (decrescente)
   const sorted = Object.entries(bairroCounts).sort((a, b) => b[1] - a[1]);
@@ -851,18 +897,15 @@ async function updateCalendar() {
   const maxCount = counts.length > 0 ? Math.max(...counts) : 0;
   const minCount = counts.length > 0 ? Math.min(...counts) : 0;
   
-  // Função para cor baseada em volume (5 categorias)
+  // Função para cor baseada em faixas fixas de volume
   function getColorForCount(count) {
     if (count === 0 || !count) return '#f3f4f6'; // Cinza claro (vazio)
     
-    const range = maxCount - minCount;
-    const normalized = range > 0 ? (count - minCount) / range : 0.5;
-    
-    if (normalized < 0.20) return '#22c55e';  // Verde médio (muito baixo)
-    if (normalized < 0.40) return '#86efac';  // Verde claro (baixo)
-    if (normalized < 0.60) return '#fbbf24';  // Amarelo (médio)
-    if (normalized < 0.80) return '#f97316';  // Laranja (alto)
-    return '#ef4444'; // Vermelho (muito alto)
+    if (count <= 35) return '#22c55e';   // Verde médio (muito baixo: 0-35)
+    if (count <= 60) return '#86efac';   // Verde claro (baixo: 36-60)
+    if (count <= 85) return '#fbbf24';   // Amarelo (médio: 61-85)
+    if (count <= 120) return '#f97316';  // Laranja (alto: 86-120)
+    return '#ef4444'; // Vermelho (muito alto: 120+)
   }
   
   // Montar grid
@@ -1138,7 +1181,7 @@ async function getReportRows(){
 				}
 				
 				allAtRows = allAtRows.concat(data);
-				console.log(`Base Geral - Página ${page}: ${data.length} registros (total: ${allAtRows.length})`);
+				// Log removido para reduzir poluição do console
 				
 				if (data.length < pageSize) {
 					hasMore = false;
@@ -1150,20 +1193,69 @@ async function getReportRows(){
 			console.log(`✅ Base Geral - Total de atendimentos buscados: ${allAtRows.length}`);
 			
 			const atRows = allAtRows;
-			// coletar documentos para buscar municipes
-			const docs = Array.from(new Set(atRows.map(a=>a.munic_doc).filter(Boolean)));
+			
+			// Função para normalizar documento (remover pontos, traços e espaços)
+			const normalizeDoc = (doc) => {
+				if (!doc) return '';
+				return String(doc).replace(/[.\-\s]/g, '').trim();
+			};
+			
+			console.log(`📋 Buscando munícipes no banco...`);
+			
 			let munMap = {};
-			if(docs.length>0){
-				const { data: munData, error: munErr } = await window.supabase.from('municipes').select('*').in('documento', docs);
-				if(munErr){ console.warn('Supabase municipes select error', munErr); }
-				if(munData && Array.isArray(munData)){
-					munMap = munData.reduce((acc,m)=>{ acc[m.documento]=m; return acc; }, {});
+			// Buscar TODOS os munícipes com PAGINAÇÃO (sem filtro) para garantir compatibilidade
+			try {
+				let allMunicipes = [];
+				let page = 0;
+				const pageSize = 1000;
+				let hasMore = true;
+				
+				while (hasMore) {
+					const from = page * pageSize;
+					const to = from + pageSize - 1;
+					
+					const { data: munData, error: munErr } = await window.supabase
+						.from('municipes')
+						.select('*')
+						.range(from, to);
+					
+					if(munErr){ 
+						console.warn('Erro ao buscar munícipes (página ' + page + '):', munErr);
+						break;
+					}
+					
+					if (!munData || munData.length === 0) {
+						hasMore = false;
+						break;
+					}
+					
+					allMunicipes = allMunicipes.concat(munData);
+					
+					if (munData.length < pageSize) {
+						hasMore = false;
+					}
+					
+					page++;
 				}
+				
+				console.log(`✅ ${allMunicipes.length} munícipes carregados do banco`);
+				
+				// Criar map com documento NORMALIZADO como chave
+				munMap = allMunicipes.reduce((acc,m)=>{ 
+					const normalizedDoc = normalizeDoc(m.documento);
+					acc[normalizedDoc] = m; 
+					return acc; 
+				}, {});
+				
+			} catch(e) {
+				console.error('Erro ao buscar munícipes:', e);
 			}
-			// mapear linhas
+			// mapear linhas usando documento NORMALIZADO para o match
 			const rows = atRows.map(a=>{
-				const m = (a.munic_doc && munMap[a.munic_doc]) ? munMap[a.munic_doc] : {};
-				return {
+				const docNormalizado = normalizeDoc(a.munic_doc);
+				const m = (docNormalizado && munMap[docNormalizado]) ? munMap[docNormalizado] : {};
+				
+				const row = {
 					name: a.mucipe_nome || '',
 					document: a.munic_doc || '',
 					endereco: m.endereco || '',
@@ -1171,11 +1263,14 @@ async function getReportRows(){
 					cidade: m.cidade || '',
 					telefone: m.telefone || '',
 					departamento: SALAS[a.dep_direcionado] || a.dep_direcionado || '',
-						datetime: a.created_at || a.inicio_atendimento || null,
-						horario_atendimento: a.inicio_atendimento || null,
-						ticket: a.senha || ''
+					datetime: a.created_at || a.inicio_atendimento || null,
+					horario_atendimento: a.inicio_atendimento || null,
+					ticket: a.senha || ''
 				};
+				return row;
 			});
+			
+			console.log(`✅ ${rows.length} atendimentos mapeados com sucesso`);
 			// Filtrar localmente usando exclusivamente created_at (apenas data, sem horário)
 			// Aplicar o mesmo comportamento de máscara ao Data Início: usar Start+1 dia como início efetivo da busca
 			// Assim, se o usuário informar 09/10 no campo 'Data Início', a busca usará 10/10 como limite inferior
