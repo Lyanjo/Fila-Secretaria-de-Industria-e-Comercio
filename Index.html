@@ -2,7 +2,6 @@
 <html lang="pt-BR">
 <head>
 	<meta charset="utf-8" />
-	<meta name="viewport" content="width=device-width, initial-scale=1" />
 	<title>Fila - Secretaria de Indústria e Comércio</title>
 	<link rel="stylesheet" href="styles.css">
 </head>
@@ -93,11 +92,14 @@
 							<label>Documento<br>
 								<input type="text" id="pre_documento" required>
 							</label>
+							<label>CEP<br>
+								<input type="text" id="pre_cep" maxlength="8" placeholder="Apenas Numeros">
+							</label>
 							<label>Endereço (Rua)<br>
 								<input type="text" id="pre_rua">
 							</label>
 							<label>Bairro<br>
-								<input type="text" id="pre_bairro">
+								<input type="text" id="pre_bairro" placeholder="Não Abreviar (Ex: VILA, JARDIM, CENTRO, PARQUE)">
 							</label>
 							<label>Cidade<br>
 								<input type="text" id="pre_cidade">

@@ -11,6 +11,12 @@ function normalizeDocument(doc) {
 	return String(doc).replace(/[.\-\s]/g, '').trim();
 }
 
+// Função para normalizar CEP (remove traço, mantém apenas 8 dígitos)
+function normalizeCEP(cep) {
+	if (!cep) return '';
+	return String(cep).replace(/\D/g, '').slice(0, 8);
+}
+
 // lista de departamentos (chaves podem ser números ou códigos - suportamos '60' como Seguro Desemprego)
 const SALAS = {
 	1: 'Sala 1 - Junta Militar',
@@ -1868,11 +1874,14 @@ const receptionRegisterForm = document.getElementById('receptionRegisterForm');
 const regCancelBtn = document.getElementById('reg_cancel');
 
 async function createMunicipe(m){
-	// m: { name, document, preferencial, endereco?, bairro?, cidade?, telefone? }
+	// m: { name, document, preferencial, cep?, endereco?, bairro?, cidade?, telefone? }
 	state.municipes = state.municipes || [];
 	
 	// Normalizar documento (remover pontos, traços e espaços)
 	const docNormalizado = normalizeDocument(m.document);
+	
+	// Normalizar CEP (remover traço, apenas 8 dígitos)
+	const cepNormalizado = normalizeCEP(m.cep);
 	
 	// gerar localId para referencia quando criado offline
 	const localId = 'local-' + Date.now() + '-' + Math.floor(Math.random()*1000);
@@ -1883,6 +1892,7 @@ async function createMunicipe(m){
 				nome: m.name, 
 				documento: docNormalizado, 
 				preferencial: !!m.preferencial, 
+				cep: cepNormalizado || null,
 				endereco: m.endereco || '', 
 				bairro: m.bairro || '', 
 				cidade: m.cidade || '', 
@@ -1895,17 +1905,17 @@ async function createMunicipe(m){
 			const { data, error } = await upsertMunQ.select().maybeSingle();
 			if(error){ console.error('[createMunicipe] upsert error', error); throw error; }
 			// armazenar localmente também (fallback/offline)
-			state.municipes.push({ nome: data.nome, documento: data.documento, preferencial: data.preferencial, endereco: data.endereco, bairro: data.bairro, cidade: data.cidade, telefone: data.telefone, id: data.id, createdAt: data.created_at });
+			state.municipes.push({ nome: data.nome, documento: data.documento, preferencial: data.preferencial, cep: data.cep, endereco: data.endereco, bairro: data.bairro, cidade: data.cidade, telefone: data.telefone, id: data.id, createdAt: data.created_at });
 			saveState();
-			return { nome: data.nome, documento: data.documento, id: data.id, preferencial: data.preferencial, endereco: data.endereco, bairro: data.bairro, cidade: data.cidade, telefone: data.telefone };
+			return { nome: data.nome, documento: data.documento, id: data.id, preferencial: data.preferencial, cep: data.cep, endereco: data.endereco, bairro: data.bairro, cidade: data.cidade, telefone: data.telefone };
 		} else {
 			// fallback: gravar localmente
 			const existing = state.municipes.find(x=>normalizeDocument(x.documento) === docNormalizado);
 			if(existing) return existing;
-			const rec = { nome: m.name, documento: docNormalizado, preferencial: !!m.preferencial, endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', createdAt: formatLocalTimestamp(), localId };
+			const rec = { nome: m.name, documento: docNormalizado, preferencial: !!m.preferencial, cep: cepNormalizado || '', endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', createdAt: formatLocalTimestamp(), localId };
 			state.municipes.push(rec);
 			// enfileirar criação remota para quando online
-			enqueueSync({ type: 'createMunicipe', payload: { name: m.name, document: docNormalizado, preferencial: !!m.preferencial, endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', localId } });
+			enqueueSync({ type: 'createMunicipe', payload: { name: m.name, document: docNormalizado, preferencial: !!m.preferencial, cep: cepNormalizado || '', endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', localId } });
 			saveState();
 			return rec;
 		}
@@ -1914,9 +1924,9 @@ async function createMunicipe(m){
 		console.warn('createMunicipe fallback local', e);
 		const existing = state.municipes.find(x=>normalizeDocument(x.documento) === docNormalizado);
 		if(existing) return existing;
-	const rec = { nome: m.name, documento: docNormalizado, preferencial: !!m.preferencial, endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', createdAt: formatLocalTimestamp(), localId };
+	const rec = { nome: m.name, documento: docNormalizado, preferencial: !!m.preferencial, cep: cepNormalizado || '', endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', createdAt: formatLocalTimestamp(), localId };
 		state.municipes.push(rec);
-		enqueueSync({ type: 'createMunicipe', payload: { name: m.name, document: m.document, preferencial: !!m.preferencial, endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', localId } });
+		enqueueSync({ type: 'createMunicipe', payload: { name: m.name, document: m.document, preferencial: !!m.preferencial, cep: cepNormalizado || '', endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', localId } });
 		saveState();
 		return rec;
 	}
@@ -1955,17 +1965,25 @@ if(regCancelBtn){
 // handler para pré-cadastro (direita)
 const preCadastroForm = document.getElementById('preCadastroForm');
 if(preCadastroForm){
+	// Garantir que todos os campos de texto iniciem vazios ao carregar a página
+	const camposTexto = ['pre_nome', 'pre_documento', 'pre_cep', 'pre_rua', 'pre_bairro', 'pre_cidade', 'pre_telefone'];
+	camposTexto.forEach(id => {
+		const campo = document.getElementById(id);
+		if(campo) campo.value = '';
+	});
+	
 	preCadastroForm.addEventListener('submit', async (ev)=>{
 		ev.preventDefault();
 		const name = document.getElementById('pre_nome').value.trim();
 		const doc = document.getElementById('pre_documento').value.trim();
+		const cep = (document.getElementById('pre_cep') || {}).value.trim();
 		const rua = (document.getElementById('pre_rua') || {}).value.trim();
 		const bairro = (document.getElementById('pre_bairro') || {}).value.trim();
 		const cidade = (document.getElementById('pre_cidade') || {}).value.trim();
 		const telefone = (document.getElementById('pre_telefone') || {}).value.trim();
 		const pref = document.getElementById('pre_preferencial').checked;
 		if(!name || !doc){ alert('Nome e documento são obrigatórios'); return; }
-		const mun = await createMunicipe({ name, document: doc, preferencial: pref, endereco: rua, bairro, cidade, telefone });
+		const mun = await createMunicipe({ name, document: doc, preferencial: pref, cep, endereco: rua, bairro, cidade, telefone });
 		// atualizar selectedInfo para confirmar
 		const selectedInfo = document.getElementById('selectedInfo');
 		if(selectedInfo) selectedInfo.innerHTML = `<strong>${mun.nome}</strong><br><small>${mun.documento}</small>`;
@@ -1975,6 +1993,124 @@ if(preCadastroForm){
 		preCadastroForm.reset();
 	});
 }
+
+// Validação automática para CEP (apenas 8 dígitos numéricos)
+const cepInput = document.getElementById('pre_cep');
+if(cepInput){
+	cepInput.addEventListener('input', async (e)=>{
+		// Remove não-dígitos e limita a 8 caracteres
+		e.target.value = e.target.value.replace(/\D/g, '').slice(0, 8);
+		
+		// Quando completar 8 dígitos, busca endereço automaticamente
+		if(e.target.value.length === 8){
+			try {
+				const cep = e.target.value;
+				const response = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
+				
+				if(response.ok){
+					const data = await response.json();
+					
+					// Verifica se CEP foi encontrado (sem erro)
+					if(!data.erro){
+						// Preenche os campos automaticamente em UPPERCASE e sem pontuação
+						const ruaInput = document.getElementById('pre_rua');
+						const bairroInput = document.getElementById('pre_bairro');
+						const cidadeInput = document.getElementById('pre_cidade');
+						
+						if(ruaInput && data.logradouro) {
+							ruaInput.value = data.logradouro.replace(/[.,;:!'"´`]/g, '').toUpperCase();
+						}
+						if(bairroInput && data.bairro) {
+							bairroInput.value = data.bairro.replace(/[.,;:!'"´`]/g, '').toUpperCase();
+						}
+						if(cidadeInput && data.localidade) {
+							cidadeInput.value = data.localidade.replace(/[.,;:!'"´`]/g, '').toUpperCase();
+						}
+						
+						// Feedback visual
+						cepInput.style.borderColor = '#4CAF50';
+						setTimeout(() => { cepInput.style.borderColor = ''; }, 2000);
+					} else {
+						// CEP não encontrado
+						console.warn('CEP não encontrado na base de dados');
+						cepInput.style.borderColor = '#ff9800';
+						setTimeout(() => { cepInput.style.borderColor = ''; }, 2000);
+					}
+				}
+			} catch(error) {
+				console.error('Erro ao buscar CEP:', error);
+				cepInput.style.borderColor = '#f44336';
+				setTimeout(() => { cepInput.style.borderColor = ''; }, 2000);
+			}
+		}
+	});
+}
+
+// Converter todos os campos de texto do cadastro para UPPERCASE
+const cadastroTextInputs = [
+	document.getElementById('pre_nome'),
+	document.getElementById('pre_rua'),
+	document.getElementById('pre_bairro'),
+	document.getElementById('pre_cidade')
+];
+
+cadastroTextInputs.forEach(input => {
+	if(input){
+		input.addEventListener('input', (e) => {
+			const start = e.target.selectionStart;
+			const end = e.target.selectionEnd;
+			// Remove pontuações e converte para UPPERCASE
+			e.target.value = e.target.value
+				.replace(/[.,;:!'"´`]/g, '')
+				.toUpperCase();
+			e.target.setSelectionRange(start, end);
+		});
+		
+		// Também converte ao colar
+		input.addEventListener('paste', (e) => {
+			setTimeout(() => {
+				const start = e.target.selectionStart;
+				const end = e.target.selectionEnd;
+				// Remove pontuações e converte para UPPERCASE
+				e.target.value = e.target.value
+					.replace(/[.,;:!'"´`]/g, '')
+					.toUpperCase();
+				e.target.setSelectionRange(start, end);
+			}, 0);
+		});
+	}
+});
+
+// Converter campos do formulário inline para UPPERCASE também
+const inlineTextInputs = [
+	document.getElementById('inline_reg_nome')
+];
+
+inlineTextInputs.forEach(input => {
+	if(input){
+		input.addEventListener('input', (e) => {
+			const start = e.target.selectionStart;
+			const end = e.target.selectionEnd;
+			// Remove pontuações e converte para UPPERCASE
+			e.target.value = e.target.value
+				.replace(/[.,;:!'"´`]/g, '')
+				.toUpperCase();
+			e.target.setSelectionRange(start, end);
+		});
+		
+		input.addEventListener('paste', (e) => {
+			setTimeout(() => {
+				const start = e.target.selectionStart;
+				const end = e.target.selectionEnd;
+				// Remove pontuações e converte para UPPERCASE
+				e.target.value = e.target.value
+					.replace(/[.,;:!'"´`]/g, '')
+					.toUpperCase();
+				e.target.setSelectionRange(start, end);
+			}, 0);
+		});
+	}
+});
 
 // Handlers para formulário inline de cadastro (quando não há resultados)
 const receptionInlineRegisterForm = document.getElementById('receptionInlineRegisterForm');
