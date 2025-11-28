@@ -1154,9 +1154,8 @@ function escapeHtml(str) {
 // Formata timestamp no formato local sem informação de fuso (YYYY-MM-DD HH:MM:SS)
 function formatLocalTimestamp(input){
 	const d = input ? new Date(input) : new Date();
-	// Subtrair 3 horas para compensar o fuso horário UTC do Postgres
-	// Quando enviamos 15h, o Postgres interpreta como UTC e exibe 18h (UTC-3 = BRT)
-	d.setHours(d.getHours() - 3);
+	// Enviar timestamp SEM timezone - o Supabase vai interpretar como hora local (America/Sao_Paulo)
+	// devido à configuração SET timezone = 'America/Sao_Paulo' no banco
 	const pad = (n)=> String(n).padStart(2,'0');
 	return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
