@@ -478,7 +478,7 @@ async function processSyncQueue(){
 						if(selErr){ console.error('[processSyncQueue:createUser] select existing error', selErr); throw selErr; }
 						if(existing && existing.id){
 							const upd = { senha_hash: payload.senha_hash, departamento: payload.departamento, ativo: payload.ativo };
-							const { error: updErr } = await window.supabase.from('login_usuarios').update(upd).eq('id', existing.id);
+							const { error: updErr } = await window.supabase.from('login_usuarios').update(upd).eq('id', existing.id).select().maybeSingle();
 							if(updErr){ console.error('[processSyncQueue:createUser] fallback update error', updErr); throw updErr; }
 						} else {
 							const { error: insErr } = await window.supabase.from('login_usuarios').insert([payload]);
@@ -1328,7 +1328,7 @@ function renderCurrentServingHTML(serving){
 		    <div class="avatar">${escapeHtml(initial)}</div>\
 		    <div class="info">\
 		      <div class="name">${escapeHtml(name)}</div>\
-		      <div class="meta">${doc ? 'Documento: ' + escapeHtml(doc) : 'Documento: '}</div>\
+		      <div class="meta">${doc ? 'Documento: ' + escapeHtml(doc) : 'Documento: ' }</div>\
 		      <div class="meta-line">Endereço: ${escapeHtml(serving.endereco || serving.address || '')}</div>\
 		      <div class="meta-line">Bairro: ${escapeHtml(serving.bairro || serving.neighborhood || '')}</div>\
 		      <div class="meta-line">Cidade: ${escapeHtml(serving.cidade || serving.city || '')}</div>\
@@ -1346,19 +1346,19 @@ function renderCurrentServingHTML(serving){
 }
 
 function renderDeptCurrentServing(sala){
-		try{
-				const titleEl = document.getElementById('deptTitle');
-				if(!titleEl) return;
-				// remove existing current-serving if presente
-				const existing = document.querySelector('.current-serving.dept-panel');
-				if(existing) existing.remove();
-				const serving = state.serving && state.serving[String(sala)] ? state.serving[String(sala)] : null;
-				const html = renderCurrentServingHTML(serving);
-				// inserir logo após o título
-			titleEl.insertAdjacentHTML('afterend', html); 
-			// anexar handlers para botões do card (se presentes)
-			attachCardHandlers();
-		}catch(e){ console.warn('renderDeptCurrentServing error', e); }
+	try{
+			const titleEl = document.getElementById('deptTitle');
+			if(!titleEl) return;
+			// remove existing current-serving if presente
+			const existing = document.querySelector('.current-serving.dept-panel');
+			if(existing) existing.remove();
+			const serving = state.serving && state.serving[String(sala)] ? state.serving[String(sala)] : null;
+			const html = renderCurrentServingHTML(serving);
+			// inserir logo após o título
+		titleEl.insertAdjacentHTML('afterend', html); 
+		// anexar handlers para botões do card (se presentes)
+		attachCardHandlers();
+	}catch(e){ console.warn('renderDeptCurrentServing error', e); }
 }
 
 function attachCardHandlers(){
@@ -1702,7 +1702,8 @@ async function callNextFor(sala){
 		// se existir remoteId, atualizar apenas o registro remoto
 				if(at && at.remoteId && window.supabase && window.navigator.onLine){
 			try{
-				// marcar inicio e definir concluido = false para representar atendimento ativo
+				// adicionar log para depuração: mostrar timestamp enviado no update
+				console.log('[DEBUG] update inicio_atendimento -> id:', at.remoteId, 'inicio_atendimento:', inicioTs);
 				const { error } = await window.supabase.from('atendimentos').update({ inicio_atendimento: inicioTs, concluido: false }).eq('id', at.remoteId);
 				if(error){ console.warn('update inicio_atendimento supabase failed', error); enqueueSync({ type: 'updateAtendimento', payload: { remoteId: at.remoteId, inicio_atendimento: inicioTs, concluido: false } }); }
 			}catch(e){ console.warn('update inicio_atendimento exception', e); enqueueSync({ type: 'updateAtendimento', payload: { remoteId: at.remoteId, inicio_atendimento: inicioTs, concluido: false } }); }
@@ -1710,16 +1711,19 @@ async function callNextFor(sala){
 				// sem remoteId: tentar inserir um registro remoto com inicio_atendimento
 			if(window.supabase && window.navigator.onLine){
 				try{
-						const payload = { mucipe_nome: at.name, munic_doc: normalizeDocument(at.document), dep_direcionado: String(at.sala || sala), senha: at.ticket, created_at: formatLocalTimestamp(at.createdAt), inicio_atendimento: inicioTs, concluido: false };
-						const { data, error } = await window.supabase.from('atendimentos').insert([payload]).select().maybeSingle();
-					if(error){ console.warn('insert inicio_atendimento failed', error); // enfileirar para retry
-						// enfileira payload com inicio_atendimento para criar posteriormente
-						enqueueSync({ type: 'createAtendimento', payload: { ...at, inicio_atendimento: inicioTs } });
-					} else {
-						// atualizar referência local
-						if(at){ at.remoteId = data && data.id; at.remoteSynced = true; }
-						saveState();
-					}
+					const payload = { mucipe_nome: at.name, munic_doc: normalizeDocument(at.document), dep_direcionado: String(at.sala || sala), senha: at.ticket, created_at: formatLocalTimestamp(at.createdAt), inicio_atendimento: inicioTs, concluido: false };
+					// log do payload antes do insert
+					console.log('[DEBUG] insert inicio_atendimento payload ->', payload);
+					const { data, error } = await window.supabase.from('atendimentos').insert([payload]).select().maybeSingle();
+				if(error){ console.warn('insert inicio_atendimento failed', error); // enfileirar para retry
+					// enfileira payload com inicio_atendimento para criar posteriormente
+					enqueueSync({ type: 'createAtendimento', payload: { ...at, inicio_atendimento: inicioTs } });
+				} else {
+					// atualizar referência local
+					at.remoteId = data && data.id;
+					at.remoteSynced = true;
+					saveState();
+				}
 				}catch(e){ console.warn('insert inicio_atendimento exception', e); enqueueSync({ type: 'createAtendimento', payload: { ...at, inicio_atendimento: inicioTs } }); }
 			} else {
 				// offline: enfileirar criação contendo inicio_atendimento para ser aplicada no servidor
@@ -1904,7 +1908,7 @@ async function createMunicipe(m){
 			const { data, error } = await upsertMunQ.select().maybeSingle();
 			if(error){ console.error('[createMunicipe] upsert error', error); throw error; }
 			// armazenar localmente também (fallback/offline)
-			state.municipes.push({ nome: data.nome, documento: data.documento, preferencial: data.preferencial, cep: data.cep, endereco: data.endereco, bairro: data.bairro, cidade: data.cidade, telefone: data.telefone, id: data.id, createdAt: data.created_at });
+			state.municipes.push({ nome: data.nome, documento: data.documento, preferencial: data.preferencial, cep: data.cep, endereco: data.endereco, bairro: data.bairro, cidade: data.cidade, telefone: data.telefone, id: data.id });
 			saveState();
 			return { nome: data.nome, documento: data.documento, id: data.id, preferencial: data.preferencial, cep: data.cep, endereco: data.endereco, bairro: data.bairro, cidade: data.cidade, telefone: data.telefone };
 		} else {
@@ -1914,7 +1918,17 @@ async function createMunicipe(m){
 			const rec = { nome: m.name, documento: docNormalizado, preferencial: !!m.preferencial, cep: cepNormalizado || '', endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', createdAt: formatLocalTimestamp(), localId };
 			state.municipes.push(rec);
 			// enfileirar criação remota para quando online
-			enqueueSync({ type: 'createMunicipe', payload: { name: m.name, document: docNormalizado, preferencial: !!m.preferencial, cep: cepNormalizado || '', endereco: m.endereco || '', bairro: m.bairro || '', cidade: m.cidade || '', telefone: m.telefone || '', localId } });
+			enqueueSync({ type: 'createMunicipe', payload: { 
+				name: muni.nome, 
+				document: muni.documento, 
+				preferencial: !!muni.preferencial, 
+				cep: cepNormalizado || '', 
+				endereco: m.endereco || '', 
+				bairro: m.bairro || '', 
+				cidade: m.cidade || '', 
+				telefone: m.telefone || '', 
+				localId: muni.localId 
+			}});
 			saveState();
 			return rec;
 		}
@@ -2757,7 +2771,7 @@ function confirmEditChoice(){
 			if(emailLabel) { emailLabel.style.display='none'; emailLabel.querySelector('input').disabled = true; }
 			if(deptLabel) { deptLabel.style.display='none'; deptLabel.querySelector('select').disabled = true; }
 			userEmail.required = false; userPassword.required = true; userPasswordConfirm.required = true; userDept.required = false;
-			userPassword.disabled = false; userPasswordConfirm.disabled = false; userPassword.focus();
+			userPassword.disabled = false; userPassword.focus();
 		} else if(which === 'department'){
 			if(emailLabel) { emailLabel.style.display='none'; emailLabel.querySelector('input').disabled = true; }
 			if(pwdLabel) { pwdLabel.style.display='none'; pwdLabel.querySelector('input').disabled = true; }
@@ -2794,7 +2808,7 @@ async function toggleUserActive(email){
 	// proteção: não permitir desativar último admin
 	if(user.role === 'adm' && !newActive){
 		const adminCount = state.users.filter(u=>u.role==='adm' && (u.ativo===undefined || u.ativo===true)).length;
-		if(adminCount <= 1){ alert('Não é possível desativar o último administrador ativo.'); return; }
+		if(adminCount <= 1){ alert('Não é possível remover o último administrador ativo.'); return; }
 	}
 	user.ativo = newActive;
 	saveState();
@@ -2896,14 +2910,10 @@ if(loginForm) loginForm.addEventListener('submit', async (e)=>{
 						const updRes = await updateUserRemote(email, { password: newPwd });
 						if(!updRes || !updRes.success){
 							enqueueSync({ type: 'updateUser', payload: { originalEmail: email, changes: { password: newPwd } } });
-							alert('Senha atualizada localmente e será sincronizada.');
-						} else {
-							alert('Senha atualizada com sucesso.');
 						}
 					}catch(upErr){
 						console.warn('Falha ao atualizar senha remotamente', upErr);
 						enqueueSync({ type: 'updateUser', payload: { originalEmail: email, changes: { password: newPwd } } });
-						alert('Senha atualizada localmente e será sincronizada.');
 					}
 					// atualizar cache local
 					state.users = state.users || [];
@@ -3122,7 +3132,7 @@ function resetUserFormMode(){
 if(state.currentUser){
 	if(btnLogout) btnLogout.classList.remove('hidden');
 	if(btnLogin) btnLogin.classList.add('hidden');
-	if(state.currentUser.role==='adm' && navUsers) navUsers.classList.remove('hidden');
+	if(state.currentUser.role==='adm') navUsers.classList.remove('hidden');
 }
 
 // chamada inicial para sincronizar UI
