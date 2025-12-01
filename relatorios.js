@@ -94,15 +94,10 @@ function getWeekRange(weeksAgo = 0) {
   saturday.setDate(sunday.getDate() + 6); // Domingo + 6 dias = Sábado
   saturday.setHours(23, 59, 59, 999);
   
-  // Aplicar máscara +1 dia (mesma lógica da Base Geral)
-  // Se semana é 23-29, buscaremos 24-30
-  const sundayAdjusted = new Date(sunday.getFullYear(), sunday.getMonth(), sunday.getDate() + 1);
-  const saturdayAdjusted = new Date(saturday.getFullYear(), saturday.getMonth(), saturday.getDate() + 1);
-  
+  // NÃO aplicar máscara +1 dia - dados já estão no timezone correto
   return { 
-    start: sundayAdjusted, 
-    end: saturdayAdjusted,
-    // Manter originais para debug
+    start: sunday, 
+    end: saturday,
     startOriginal: sunday,
     endOriginal: saturday
   };
@@ -121,13 +116,10 @@ function getMonthRange(monthsAgo = 0) {
   const lastDay = new Date(year, month + 1, 0);
   lastDay.setHours(23, 59, 59, 999);
   
-  // Aplicar máscara +1 dia
-  const firstDayAdjusted = new Date(firstDay.getFullYear(), firstDay.getMonth(), firstDay.getDate() + 1);
-  const lastDayAdjusted = new Date(lastDay.getFullYear(), lastDay.getMonth(), lastDay.getDate() + 1);
-  
+  // NÃO aplicar máscara +1 dia - dados já estão no timezone correto
   return {
-    start: firstDayAdjusted,
-    end: lastDayAdjusted,
+    start: firstDay,
+    end: lastDay,
     startOriginal: firstDay,
     endOriginal: lastDay
   };
@@ -142,13 +134,10 @@ function getLast30Days() {
   start.setDate(start.getDate() - 30);
   start.setHours(0, 0, 0, 0);
   
-  // Aplicar máscara +1 dia
-  const startAdjusted = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1);
-  const endAdjusted = new Date(end.getFullYear(), end.getMonth(), end.getDate() + 1);
-  
+  // NÃO aplicar máscara +1 dia - dados já estão no timezone correto
   return {
-    start: startAdjusted,
-    end: endAdjusted
+    start: start,
+    end: end
   };
 }
 
@@ -290,19 +279,13 @@ async function fetchAtendimentosFromSupabase(startDate, endDate) {
       return atendimentos;
     }
     
-    // Aplicar +1 dia na data início (máscara da Base Geral)
+    // NÃO aplicar máscara +1 dia - dados já estão no timezone correto
     const start = startDate ? new Date(startDate) : null;
-    const startAdjusted = start ? new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1) : null;
-    
-    // Aplicar +1 dia na data fim (máscara da Base Geral)
     const end = endDate ? new Date(endDate) : null;
-    const endAdjusted = end ? new Date(end.getFullYear(), end.getMonth(), end.getDate() + 1) : null;
     
-    console.log('Máscara de data aplicada:', {
-      startOriginal: startDate,
-      startAdjusted: startAdjusted ? startAdjusted.toISOString().split('T')[0] : null,
-      endOriginal: endDate,
-      endAdjusted: endAdjusted ? endAdjusted.toISOString().split('T')[0] : null
+    console.log('Filtro de data aplicado:', {
+      startDate: startDate,
+      endDate: endDate
     });
     
     const filtered = atendimentos.filter(r => {
@@ -310,8 +293,8 @@ async function fetchAtendimentosFromSupabase(startDate, endDate) {
       const created = new Date(r.datetime);
       const createdDateOnly = new Date(created.getFullYear(), created.getMonth(), created.getDate());
       
-      if (startAdjusted && createdDateOnly < startAdjusted) return false;
-      if (endAdjusted && createdDateOnly > endAdjusted) return false;
+      if (start && createdDateOnly < start) return false;
+      if (end && createdDateOnly > end) return false;
       
       return true;
     });
@@ -874,13 +857,10 @@ async function updateCalendar() {
   const firstDay = new Date(year, month, 1);
   const lastDay = new Date(year, month + 1, 0);
   
-  // Aplicar máscara +1
-  const firstDayAdjusted = new Date(firstDay.getFullYear(), firstDay.getMonth(), firstDay.getDate() + 1);
-  const lastDayAdjusted = new Date(lastDay.getFullYear(), lastDay.getMonth(), lastDay.getDate() + 1);
-  
+  // NÃO aplicar máscara +1 dia - dados já estão no timezone correto
   const data = await fetchAtendimentosFromSupabase(
-    firstDayAdjusted.toISOString().split('T')[0],
-    lastDayAdjusted.toISOString().split('T')[0]
+    firstDay.toISOString().split('T')[0],
+    lastDay.toISOString().split('T')[0]
   );
   
   // Agrupar por dia
@@ -1272,11 +1252,9 @@ async function getReportRows(){
 			
 			console.log(`✅ ${rows.length} atendimentos mapeados com sucesso`);
 			// Filtrar localmente usando exclusivamente created_at (apenas data, sem horário)
-			// Aplicar o mesmo comportamento de máscara ao Data Início: usar Start+1 dia como início efetivo da busca
-			// Assim, se o usuário informar 09/10 no campo 'Data Início', a busca usará 10/10 como limite inferior
-			const start = from ? new Date(from.getFullYear(), from.getMonth(), from.getDate() + 1) : null;
-			// Ajuste intencional também para o filtro 'Data Fim': usar End+1 dia como limite superior (mascara consistente)
-			const end = to ? new Date(to.getFullYear(), to.getMonth(), to.getDate() + 1) : null; // date-only adjusted
+			// NÃO aplicar máscara +1 dia - dados já estão no timezone correto
+			const start = from ? new Date(from.getFullYear(), from.getMonth(), from.getDate()) : null;
+			const end = to ? new Date(to.getFullYear(), to.getMonth(), to.getDate()) : null;
 			const filtered = rows.filter(r=>{
 				if(!r.datetime) return false;
 				const created = new Date(r.datetime);
