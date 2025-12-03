@@ -1252,9 +1252,10 @@ async function getReportRows(){
 			
 			console.log(`✅ ${rows.length} atendimentos mapeados com sucesso`);
 			// Filtrar localmente usando exclusivamente created_at (apenas data, sem horário)
-			// NÃO aplicar máscara +1 dia - dados já estão no timezone correto
-			const start = from ? new Date(from.getFullYear(), from.getMonth(), from.getDate()) : null;
-			const end = to ? new Date(to.getFullYear(), to.getMonth(), to.getDate()) : null;
+			// Aplicar máscara +1 dia para corrigir offset de fuso horário na busca
+			// Quando usuário busca 02/12, precisa buscar 03/12 no banco para pegar os registros corretos
+			const start = from ? new Date(from.getFullYear(), from.getMonth(), from.getDate() + 1) : null;
+			const end = to ? new Date(to.getFullYear(), to.getMonth(), to.getDate() + 1) : null;
 			const filtered = rows.filter(r=>{
 				if(!r.datetime) return false;
 				const created = new Date(r.datetime);
