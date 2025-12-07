@@ -10,88 +10,105 @@
     return;
   }
 
-  // Função auxiliar: tenta importar versão ESM do SDK
+  // Versão específica que funciona bem
+  const SUPABASE_VERSION = '2.38.4';
+
+  // Fallback 1: ESM via jsdelivr
   async function tryLoadESM(){
     try{
-      // +esm fornece versão compatível com import dinâmico
-      const mod = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm');
+      const mod = await import(`https://cdn.jsdelivr.net/npm/@supabase/supabase-js@${SUPABASE_VERSION}/+esm`);
       if(mod && typeof mod.createClient === 'function'){
-        console.info('supabase-js carregado via ESM (cdn.jsdelivr)');
+        console.info('✅ supabase-js carregado via ESM (jsdelivr)');
         return mod.createClient;
       }
-      console.warn('Import ESM do supabase-js não retornou createClient');
       return null;
     }catch(e){
-      console.warn('Import ESM do supabase-js falhou:', e && e.message ? e.message : e);
+      console.warn('⚠️ Fallback ESM (jsdelivr) falhou:', e.message);
       return null;
     }
   }
 
-  // Função auxiliar: tenta carregar UMD via tag <script> (fallback)
+  // Fallback 2: UMD via unpkg
   function tryLoadUMD(){
     return new Promise((resolve) => {
-      try{
-        const script = document.createElement('script');
-        // unpkg costuma servir o bundle UMD com global `supabase`
-        script.src = 'https://unpkg.com/@supabase/supabase-js/dist/umd/supabase.min.js';
-        script.async = true;
-        script.onload = () => {
-          // Algumas builds expõem createClient como window.supabase.createClient
-          if(window.supabase && typeof window.supabase.createClient === 'function'){
-            console.info('supabase-js carregado via UMD (unpkg) — createClient disponível em window.supabase.createClient');
-            resolve(window.supabase.createClient);
-            return;
-          }
-          // Em alguns cenários a lib pode expor createClient globalmente
-          if(typeof window.createClient === 'function'){
-            console.info('createClient já disponível globalmente após UMD load');
-            resolve(window.createClient);
-            return;
-          }
-          console.warn('UMD carregado mas createClient não encontrado');
+      const script = document.createElement('script');
+      script.src = `https://unpkg.com/@supabase/supabase-js@${SUPABASE_VERSION}/dist/umd/supabase.js`;
+      script.async = true;
+      script.onload = () => {
+        if(window.supabase && typeof window.supabase.createClient === 'function'){
+          console.info('✅ supabase-js carregado via UMD (unpkg)');
+          resolve(window.supabase.createClient);
+        } else {
+          console.warn('⚠️ UMD carregado mas createClient não encontrado');
           resolve(null);
-        };
-        script.onerror = (ev) => {
-          console.warn('Falha ao carregar UMD do supabase-js (unpkg):', ev && ev.type ? ev.type : ev);
-          resolve(null);
-        };
-        document.head.appendChild(script);
-      }catch(ex){
-        console.warn('Erro ao criar elemento <script> para UMD:', ex && ex.message ? ex.message : ex);
+        }
+      };
+      script.onerror = () => {
+        console.warn('⚠️ Fallback UMD (unpkg) falhou');
         resolve(null);
-      }
+      };
+      document.head.appendChild(script);
     });
   }
 
-  // Tenta carregar SDK por múltiplos meios
-  let createClientFn = null;
-  // Se createClient já está disponível, usa direto
-  if(typeof window.createClient === 'function'){
-    createClientFn = window.createClient;
-    console.info('createClient já disponível no escopo global');
+  // Fallback 3: UMD via CDNJS (mais estável)
+  function tryLoadCDNJS(){
+    return new Promise((resolve) => {
+      const script = document.createElement('script');
+      script.src = `https://cdnjs.cloudflare.com/ajax/libs/supabase-js/${SUPABASE_VERSION}/supabase.min.js`;
+      script.async = true;
+      script.onload = () => {
+        if(window.supabase && typeof window.supabase.createClient === 'function'){
+          console.info('✅ supabase-js carregado via CDNJS (fallback 3)');
+          resolve(window.supabase.createClient);
+        } else {
+          console.warn('⚠️ CDNJS carregado mas createClient não encontrado');
+          resolve(null);
+        }
+      };
+      script.onerror = () => {
+        console.warn('⚠️ Fallback CDNJS falhou');
+        resolve(null);
+      };
+      document.head.appendChild(script);
+    });
   }
 
-  if(!createClientFn){
-    createClientFn = await tryLoadESM();
-  }
+  // Tenta carregar em ordem
+  let createClientFn = null;
+
+  // Fallback 1
+  createClientFn = await tryLoadESM();
+  
+  // Fallback 2
   if(!createClientFn){
     createClientFn = await tryLoadUMD();
   }
 
+  // Fallback 3
+  if(!createClientFn){
+    createClientFn = await tryLoadCDNJS();
+  }
+
   if(!createClientFn){
     window.supabase = null;
-    console.warn('Falha ao carregar SDK Supabase — verifique conexão de rede, bloqueio por firewall/CSP ou URL do CDN. Abra o Network tab para inspecionar a requisição do script.');
+    console.error('❌ ERRO: Não foi possível carregar Supabase de nenhuma CDN');
+    console.error('Verifique:');
+    console.error('1. Conexão com a internet');
+    console.error('2. Firewall/antivírus bloqueando CDNs');
+    console.error('3. Extensões do navegador (ad-blockers)');
+    alert('⚠️ Sistema não conseguiu conectar ao banco de dados.\n\nVerifique sua conexão com a internet e recarregue a página.');
     return;
   }
 
   // Inicializa o cliente
   try{
-    window.createClient = window.createClient || createClientFn;
-    window.supabase = window.supabaseJs = window.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY);
-    console.info('Supabase client inicializado com sucesso');
+    window.supabase = createClientFn(window.SUPABASE_URL, window.SUPABASE_ANON_KEY);
+    console.info('✅ Supabase client inicializado com sucesso');
   }catch(e){
     window.supabase = null;
-    console.warn('Erro ao inicializar Supabase (createClient existia, mas init falhou):', e && e.message ? e.message : e);
+    console.error('❌ Erro ao inicializar Supabase:', e.message);
+    alert('⚠️ Erro ao conectar ao banco de dados.\n\nRecarregue a página.');
   }
 
 })();
