@@ -881,11 +881,11 @@ async function updateCalendar() {
   function getColorForCount(count) {
     if (count === 0 || !count) return '#f3f4f6'; // Cinza claro (vazio)
     
-    if (count <= 35) return '#22c55e';   // Verde médio (muito baixo: 0-35)
-    if (count <= 60) return '#86efac';   // Verde claro (baixo: 36-60)
-    if (count <= 85) return '#fbbf24';   // Amarelo (médio: 61-85)
-    if (count <= 120) return '#f97316';  // Laranja (alto: 86-120)
-    return '#ef4444'; // Vermelho (muito alto: 120+)
+    if (count <= 20) return '#22c55e';   // Verde médio (muito baixo: 0-20)
+    if (count <= 40) return '#86efac';   // Verde claro (baixo: 21-40)
+    if (count <= 60) return '#fbbf24';   // Amarelo (médio: 41-60)
+    if (count <= 90) return '#f97316';   // Laranja (alto: 61-90)
+    return '#ef4444'; // Vermelho (muito alto: 91+)
   }
   
   // Montar grid
