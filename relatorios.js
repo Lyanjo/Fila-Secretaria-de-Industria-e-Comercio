@@ -881,10 +881,10 @@ async function updateCalendar() {
   function getColorForCount(count) {
     if (count === 0 || !count) return '#f3f4f6'; // Cinza claro (vazio)
     
-    if (count <= 20) return '#22c55e';   // Verde médio (muito baixo: 0-20)
-    if (count <= 40) return '#86efac';   // Verde claro (baixo: 21-40)
-    if (count <= 60) return '#fbbf24';   // Amarelo (médio: 41-60)
-    if (count <= 90) return '#f97316';   // Laranja (alto: 61-90)
+    if (count <= 20) return '#0de6eeff';   // Verde médio (muito baixo: 0-20)
+    if (count <= 40) return '#0498ee';   // Verde claro (baixo: 21-40)
+    if (count <= 60) return '#22c55e';   // Amarelo (médio: 41-60)
+    if (count <= 90) return '#e7c607';   // Laranja (alto: 61-90)
     return '#ef4444'; // Vermelho (muito alto: 91+)
   }
   
@@ -917,7 +917,7 @@ async function updateCalendar() {
     
     const count = dayCounts[day] || 0;
     dayEl.style.backgroundColor = getColorForCount(count);
-    dayEl.style.color = count > maxCount * 0.5 ? '#fff' : '#1f2937';
+    dayEl.style.color = count > 20 ? '#fff' : '#1f2937';
     
     dayEl.textContent = day;
     
